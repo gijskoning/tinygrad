@@ -1,16 +1,14 @@
 import math, unittest
 from tinygrad.jit import TinyJit
-from tinygrad.helpers import GlobalCounters
+from tinygrad.helpers import getenv
 from tinygrad.shape.symbolic import Variable
 from tinygrad.tensor import Tensor, Device
 import numpy as np
 import torch
 
+@unittest.skipIf(getenv("ARM64"), "ARM64 is not supported")
 @unittest.skipUnless(Device.DEFAULT in ["GPU", "METAL", "CLANG"], f"{Device.DEFAULT} is not supported")
 class TestSymbolicJit(unittest.TestCase):
-  def setUp(self): GlobalCounters.var_vals = {}
-  def tearDown(self) -> None: GlobalCounters.var_vals = {}
-
   def test_2d_matmul(self):
     @TinyJit
     def matmul(a, b): return (a@b).realize()

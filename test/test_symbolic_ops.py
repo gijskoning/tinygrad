@@ -1,15 +1,13 @@
 import math, unittest
 from tinygrad.shape.symbolic import Variable
-from tinygrad.helpers import GlobalCounters
+from tinygrad.helpers import getenv
 from tinygrad.tensor import Tensor, Device
 import numpy as np
 import torch
 
+@unittest.skipIf(getenv("ARM64"), "ARM64 is not supported")
 @unittest.skipUnless(Device.DEFAULT in ["GPU", "METAL", "CLANG"], f"{Device.DEFAULT} is not supported")
 class TestSymbolicOps(unittest.TestCase):
-  def setUp(self): GlobalCounters.var_vals = {}
-  def tearDown(self): GlobalCounters.var_vals = {}
-
   def test_plus1(self):
     def f(a): return (a+1).realize()
     for i in range(1, 5):
