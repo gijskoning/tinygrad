@@ -8,13 +8,6 @@ from typing import List, Dict, Callable, Tuple, Type, Union, Optional, Any
 # NOTE: Python has different behavior for negative mod and floor div than c
 # symbolic matches the Python behavior, but the code output is agnostic, and will never have negative numbers in div or mod
 
-def is_sym_int(x: Any) -> bool: return isinstance(x, (int, Node))
-def sym_infer(expr, var_vals) -> int:
-  if isinstance(expr, int): return expr
-  local_vars = {k.expr: v for k,v in var_vals.items()}
-  exec("INFERRED="+render_python[type(expr)](expr, ops=None, ctx=None), None, local_vars)  # pylint: disable=exec-used
-  return local_vars["INFERRED"]
-
 class Node:
   b: Union[Node, int]
   min: int
@@ -70,6 +63,7 @@ class Node:
   def __rfloordiv__(self, b:int): raise RuntimeError(f"not supported: {b} // {self}")
   def __floordiv__(self, b:Union[Node,int], factoring_allowed=True):
     if isinstance(b, Node):
+      if self == b: return NumNode(1)
       if (b > self).min > 0 and self.min >= 0: return NumNode(0)
       raise RuntimeError(f"not supported: {self} // {b}")
     assert b != 0
@@ -98,7 +92,7 @@ class Node:
     return create_node(ModNode(self, b))
 
   @staticmethod
-  def num(num:int) -> NumNode: return NumNode(num)
+  def num(num:Union[Node,int]) -> Node: return NumNode(num) if isinstance(num, int) else num
 
   @staticmethod
   def factorize(nodes:List[Node]) -> List[Node]:
@@ -267,6 +261,12 @@ def create_rednode(typ:Type[RedNode], nodes:List[Node]):
   elif typ == AndNode: ret.min, ret.max = (min([x.min for x in nodes]), max([x.max for x in nodes]))
   return create_node(ret)
 
+def is_sym_int(x: Any) -> bool: return isinstance(x, (int, Node))
+def sym_infer(expr, var_vals) -> int:
+  if isinstance(expr, int): return expr
+  local_vars = {k.expr: v for k,v in var_vals.items()}
+  exec("INFERRED="+render_python[type(expr)](expr, ops=None, ctx=None), None, local_vars)  # pylint: disable=exec-used
+  return local_vars["INFERRED"]
 @functools.lru_cache(maxsize=None)
 def sym_rename(s) -> str: return f"s{sym_rename.cache_info().currsize}"
 def sym_render(a: Union[Node, int], ops=None, ctx=None) -> str: return str(a) if isinstance(a, int) else a.render(ops, ctx)

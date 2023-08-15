@@ -4,7 +4,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Union, Type, Tuple, Any, List, Optional, Dict, Callable, cast
 from tinygrad.helpers import ansilen, prod, DEBUG, getenv, GlobalCounters, DType, colored, dedup, merge_dicts
 from tinygrad.shape.shapetracker import MovementOps
-from tinygrad.shape.symbolic import Variable, sym_infer
+from tinygrad.shape.symbolic import Variable, sym_infer, Node
 from tinygrad.runtime.lib import RawBuffer, RawConst, buf_is_kernel_arg
 if TYPE_CHECKING:
   from tinygrad.lazy import LazyBuffer
@@ -186,6 +186,8 @@ class Compiled:
     # we don't have an output buffer, we have to create it, and create to max size if it has symbolic shape
     if not output.realized:
       output.realized = self.buffer(prod((s if isinstance(s, int) else s.max for s in output.shape)), output.dtype, **kwargs)
+    # update the output var_vals from src
+    output.st.var_vals = dict(sorted(merge_dicts([buf.st.var_vals for buf in ast.buffers]).items(), key=lambda kv:cast(Node,kv[0]).key))
 
     from tinygrad.codegen.linearizer import Linearizer
     k = Linearizer(ast, output, self.linearizer_opts)
@@ -205,7 +207,5 @@ class Compiled:
 
     if prg.name == getenv("PRINT_PRG", ''): print(prg.prg)
 
-    # TODO: output.st.var_vals only needs the vars from shape, but exec needs all
-    output.st.var_vals = dict(sorted(merge_dicts([buf.st.var_vals for buf in ast.buffers]).items()))
     prg.exec(k.bufs, var_vals=output.st.var_vals)
     return output.realized

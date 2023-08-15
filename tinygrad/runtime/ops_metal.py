@@ -66,7 +66,7 @@ class MetalProgram:
     encoder.setComputePipelineState_(self.pipeline_state)
     for i,a in enumerate(bufs):
       if isinstance(a, RawMetalBuffer): encoder.setBuffer_offset_atIndex_(a._buf, 0, i)
-      elif isinstance(a, int): encoder.setBytes_length_atIndex_(ctypes.c_int32(a), 4, i)
+      elif isinstance(a, int): encoder.setBytes_length_atIndex_(ctypes.c_int32(a), ctypes.sizeof(ctypes.c_int32(a)), i)
       else: raise RuntimeError(f"arg at index {i} has unsupported type {type(a)}")
     encoder.dispatchThreadgroups_threadsPerThreadgroup_(Metal.MTLSize(*global_size), Metal.MTLSize(*local_size))
     encoder.endEncoding()

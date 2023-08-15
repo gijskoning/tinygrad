@@ -112,12 +112,12 @@ def expand_idxs(idxs:Sequence[Node]) -> Iterator[Tuple[Node, ...]]:
 
 class MemOp(NamedTuple):
   name: str
-  idx: Union[Variable, NumNode]
+  idx: Variable
   local: bool
   memory_dtype: DType
 
   # shared
-  valid: Union[Variable, NumNode]
+  valid: Variable
   invalid_value: Union[float, int] = 0.0
 
 class ConstOp(NamedTuple):
@@ -302,7 +302,7 @@ class Linearizer:
     for buf,name in self.arg_bufs.items():
       self.uop(UOps.DEFINE_GLOBAL, None, [], (name, buf.dtype))
     # add variables from symbolic shapes
-    for var in sorted(set(v for buf in self.ast.buffers for v in buf.st.var_vals)):
+    for var in sorted(set(v for buf in self.ast.buffers for v in buf.st.var_vals), key=lambda k: k.key):
       self.uop(UOps.DEFINE_GLOBAL, None, [], (f"SYM_{var.expr}", dtypes.int32))
 
     # add a local buffer for multistage reduce
