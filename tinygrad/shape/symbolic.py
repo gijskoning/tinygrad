@@ -8,6 +8,8 @@ from typing import List, Dict, Callable, Tuple, Type, Union, Optional, Any
 # NOTE: Python has different behavior for negative mod and floor div than c
 # symbolic matches the Python behavior, but the code output is agnostic, and will never have negative numbers in div or mod
 
+def is_sym_int(x: Any) -> bool: return isinstance(x, (int, Node))
+
 class Node:
   b: Union[Node, int]
   min: int
@@ -92,7 +94,7 @@ class Node:
     return create_node(ModNode(self, b))
 
   @staticmethod
-  def num(num:Union[Node,int]) -> Node: return NumNode(num) if isinstance(num, int) else num
+  def num(num:int) -> NumNode: return NumNode(num)
 
   @staticmethod
   def factorize(nodes:List[Node]) -> List[Node]:
@@ -261,7 +263,6 @@ def create_rednode(typ:Type[RedNode], nodes:List[Node]):
   elif typ == AndNode: ret.min, ret.max = (min([x.min for x in nodes]), max([x.max for x in nodes]))
   return create_node(ret)
 
-def is_sym_int(x: Any) -> bool: return isinstance(x, (int, Node))
 def sym_infer(expr, var_vals) -> int:
   if isinstance(expr, int): return expr
   local_vars = {k.expr: v for k,v in var_vals.items()}

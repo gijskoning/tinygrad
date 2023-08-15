@@ -48,7 +48,7 @@ class TestSymbolicOps(unittest.TestCase):
       expected = f(q, k, v).cpu().numpy()
       np.testing.assert_allclose(symbolic, expected, atol=1e-6, rtol=1e-6)
 
-  def test_cat_dim_0(self):
+  def test_cat_dim0(self):
     def f(a, b): return a.cat(b, dim=0).realize()
     vi = Variable("i", 1, 10)
     for i in range(1, 5):
