@@ -9,6 +9,11 @@ from typing import List, Dict, Callable, Tuple, Type, Union, Optional, Any
 # symbolic matches the Python behavior, but the code output is agnostic, and will never have negative numbers in div or mod
 
 def is_sym_int(x: Any) -> bool: return isinstance(x, (int, Node))
+def sym_infer(expr, var_vals) -> int:
+  if isinstance(expr, int): return expr
+  local_vars = {k.expr: v for k,v in var_vals.items()}
+  exec("INFERRED="+render_python[type(expr)](expr, ops=None, ctx=None), None, local_vars)  # pylint: disable=exec-used
+  return local_vars["INFERRED"]
 
 class Node:
   b: Union[Node, int]
@@ -262,6 +267,8 @@ def create_rednode(typ:Type[RedNode], nodes:List[Node]):
   elif typ == AndNode: ret.min, ret.max = (min([x.min for x in nodes]), max([x.max for x in nodes]))
   return create_node(ret)
 
+@functools.lru_cache(maxsize=None)
+def sym_rename(s) -> str: return f"s{sym_rename.cache_info().currsize}"
 def sym_render(a: Union[Node, int], ops=None, ctx=None) -> str: return str(a) if isinstance(a, int) else a.render(ops, ctx)
 
 render_python: Dict[Type, Callable] = {

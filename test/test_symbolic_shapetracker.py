@@ -108,6 +108,20 @@ class TestSymbolicReshape(unittest.TestCase):
         t = t.reshape(vj, vi)
         assert t.shape == (vj, vi)
 
+  def test_two_symbol_reshape(self):
+    vi = Variable("i", 1, 5)
+    vj = Variable("j", 1, 5)
+    for i in range(1, 6):
+      for j in range(1, 6):
+        t1 = Tensor.rand(i, 5).reshape(vi, 5)
+        t2 = Tensor.rand(5, j).reshape(5, vj)
+        t = t1@t2
+        assert t.shape == (vi, vj)
+        t = t.reshape(1, vi*vj)
+        assert t.shape == (1, vi*vj)
+        t = t.reshape(vj, vi)
+        assert t.shape == (vj, vi)
+
 class TestSymbolicExpand(unittest.TestCase):
   def test_expand_into_symbols(self):
     vi = Variable("i", 1, 5)

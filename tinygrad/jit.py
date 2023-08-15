@@ -1,10 +1,10 @@
 from typing import Callable, List, Tuple, Any, Dict, cast, Union
 import functools, itertools
-from tinygrad.helpers import DEBUG, DType
-
+from tinygrad.helpers import DEBUG, DType, merge_dicts
 from tinygrad.lazy import Device
 from tinygrad.tensor import Tensor
 from tinygrad.ops import GlobalCounters, RawBuffer
+from tinygrad.shape.symbolic import Variable
 
 JIT_SUPPORTED_DEVICE = ["GPU", "CLANG", "METAL", "CUDA", "HIP", "WEBGPU"]
 
@@ -12,7 +12,7 @@ class TinyJit:
   def __init__(self, fxn:Callable):
     self.fxn: Callable = fxn
     self.cnt: int = 0
-    self.jit_cache: List[Tuple[Callable, Any]] = []  # TODO: Any should be List[RawBuffer], but this fails
+    self.jit_cache: List[Tuple[Callable, Any, Dict[Variable, int]]] = []  # TODO: Any should be List[RawBuffer], but this fails
     self.ret: Any = None
     self.input_replace: Dict[Tuple[int, int], Tuple[Union[int, str], int, DType]]= {}   # (kernel_number, buffer_number) -> (input_name, expected_size, expected_type)
 
@@ -26,10 +26,14 @@ class TinyJit:
     assert len(input_rawbuffers) != 0, "no inputs to JIT"
     assert len(set(input_rawbuffers.values())) == len(input_rawbuffers), "duplicate inputs to JIT"
     if self.cnt >= 2:
+      var_vals = dict(sorted(merge_dicts([arg.lazydata.st.var_vals for arg in args if isinstance(arg, Tensor)]).items()))
       for (j,i),(input_name, expected_size, expected_type) in self.input_replace.items():
-        assert input_rawbuffers[input_name].size == expected_size and input_rawbuffers[input_name].dtype == expected_type, f"size or type mismatch in JIT, {input_rawbuffers[input_name]} != <{expected_size}, {expected_type}>"
+        if not var_vals: assert input_rawbuffers[input_name].size == expected_size and input_rawbuffers[input_name].dtype == expected_type, f"size or type mismatch in JIT, {input_rawbuffers[input_name]} != <{expected_size}, {expected_type}>"
         self.jit_cache[j][1][i] = input_rawbuffers[input_name]
-      for prg, args in self.jit_cache: prg(args, jit=True)
+      # also need to propogate vals to the output, tests coverage???
+      for prg, args, variables in self.jit_cache:
+        for v in (var_vals.keys() & variables.keys()): variables[v] = var_vals[v]
+        prg(args, variables, jit=True)
       for (j,i) in self.input_replace.keys(): self.jit_cache[j][1][i] = None
     elif self.cnt == 1:
       GlobalCounters.cache = []
@@ -40,7 +44,7 @@ class TinyJit:
       if DEBUG >= 1: print(f"JIT captured {len(self.jit_cache)} kernels with {len(input_rawbuffers)} inputs")
 
       # get the inputs for replacement
-      for j,(prg,args) in enumerate(self.jit_cache):  # pylint: disable=E1133
+      for j,(prg,args,_) in enumerate(self.jit_cache):  # pylint: disable=E1133
         for i,a in enumerate(args):
           if a in input_rawbuffers.values():
             self.input_replace[(j,i)] = [(k, v.size, v.dtype) for k,v in input_rawbuffers.items() if v == a][0]
