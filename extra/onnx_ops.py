@@ -111,24 +111,7 @@ def Dropout(data, ratio=0.5, training_mode=False, seed=None):
   mask = Tensor((rng.random(data.shape) >= ratio), requires_grad=False, device=data.device)
   return data * mask * (1/(1.0 - ratio)), mask
 
-def Shape(data, end=None, start=0):
-  print("adapted ")
-  return Tensor(list(data.shape)[start:end], dtype=dtypes.int64)
-  #
-  # from tinygrad.shape.symbolic import Variable
-  # new_arr = list(data.shape)[start:end]
-  # for x in new_arr:
-  #   if isinstance(x, Variable):
-  #     # return new_arr
-  #     return Tensor(list(data.realize().shape)[start:end], dtype=dtypes.int64)
-  #
-  #
-  # return Tensor(new_arr, dtype=dtypes.int64) # doesnt work with variable
-  # new_shape = list(data.shape)[start:end]
-  # return Tensor(ret, dtype=dtypes.int64)#.reshape(new_shape)
-# def Shape(data, end=None, start=0):
-#   print("dt")
-#   return data.shape[start:end]
+def Shape(data, end=None, start=0): return Tensor(list(data.shape)[start:end], dtype=dtypes.int64)
 def Size(data): return prod(data if isinstance(data, list) else data.shape)
 
 # TODO: this doesn't match Tensor.flatten behavior
@@ -218,9 +201,8 @@ def Tile(input, repeats):
   expand_shape = [x for r,s in zip(repeats_, input.shape) for x in [r,s]]
   final_shape = [r*s for r,s in zip(repeats_, input.shape)]
   return input.reshape(new_shape).expand(expand_shape).reshape(final_shape)
-def Range(start, limit, delta):
-  print("Modified range to cast right dtype")
-  return Tensor.arange(*[int(safe_numpy(x)[0]) for x in (start, limit, delta)], dtype=delta.dtype)
+
+def Range(start, limit, delta): return Tensor.arange(*[safe_numpy(x)[0].item() for x in (start, limit, delta)])
 def Where(condition:Tensor,X:Tensor,Y:Tensor): return condition.where(X, Y).cast(X.dtype)
 
 def And(x:Tensor, y:Tensor): return Where((x==y), x, Tensor.zeros(*x.shape)).cast(dtypes.bool)
@@ -291,8 +273,8 @@ def EmbedLayerNormalization(input_ids, segment_ids:Optional[Tensor]=None, word_e
   vocab_size, max_position_embeddings, type_vocab_size = word_embedding.shape[0], position_embedding.shape[0], (segment_embedding.shape[0] if compute_seg_emb else None)
 
   def embedding(x:Tensor, vocab_size, weight:Tensor)->Tensor:  # TODO from nn.Embedding. Could probably upstream this to Tensor
-    vocab_counter = Tensor.arange(vocab_size, requires_grad=False).reshape(1, 1, vocab_size).expand(*x.shape, vocab_size)
-    return (vocab_counter == x.unsqueeze(2).expand(*x.shape, vocab_size)).cast(weight.dtype) @ weight
+    vocab_counter = Tensor.arange(vocab_size, dtype=x.dtype, requires_grad=False).reshape(1, 1, vocab_size).expand(*x.shape, vocab_size)
+    return (vocab_counter == x.unsqueeze(2).expand(*x.shape, vocab_size)) @ weight
 
   # bert embedding layer
   if epsilon is None: epsilon = 1e-12
@@ -326,8 +308,16 @@ def Attention(input:Tensor, weights, bias:Optional[Tensor]=None, mask_index:Opti
     xk, xv = Tensor.cat(past[0], xk, dim=-2), Tensor.cat(past[1], xv, dim=-2)
     present = Tensor.cat(xk.unsqueeze(0), xv.unsqueeze(0))
 
+  def attn(query, key, value, attn_mask):
+    query_length, key_length = query.shape[-2], key.shape[-2]
+    cdim = max(query_length, key_length) + 1
+    attn_weights = query @ key.transpose(-1, -2) / math.sqrt(value.shape[-1])
+    # This is where Tensor.scaled_dot_product_attention differs:
+    causal_mask = Tensor.ones((cdim, cdim), requires_grad=False).cast(dtypes.bool).tril(0)[key_length - query_length : key_length, :key_length].cast(dtypes.bool)
+    return (Tensor.where(causal_mask, attn_weights, -float("inf")) + attn_mask).softmax(-1) @ value
+
   bsz, _, seq_len, _ = xq.shape
-  out = Tensor.scaled_dot_product_attention(xq, xk, xv, mask_index).transpose(1, 2).reshape(bsz, seq_len, -1)
+  out = attn(xq, xk, xv, mask_index).transpose(1, 2).reshape(bsz, seq_len, -1)
   return out, present
 
 def SkipLayerNormalization(input:Tensor, skip:Tensor, gamma, beta:Optional[Tensor]=None, bias:Optional[Tensor]=None, epsilon=None):

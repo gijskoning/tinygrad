@@ -42,7 +42,7 @@ def get_run_onnx(onnx_model: ModelProto):
       elif len(inp.int32_data) > 0:
         ret = Tensor(np.array(inp.int32_data, dtype=np.int32).reshape(inp.dims), requires_grad=False)
       else:
-        ret = Tensor(np.frombuffer(inp.raw_data, dtype=tensor_dtype_to_np_dtype(inp.data_type)).reshape(inp.dims), requires_grad=False)
+        ret = Tensor(np.frombuffer(inp.raw_data, dtype=tensor_dtype_to_np_dtype(inp.data_type)).reshape(inp.dims).astype(np.float32).copy(), requires_grad=False)
     else:
       raise Exception(f"bad data type {inp.name} {inp.dims} {inp.data_type}")
     return ret
@@ -80,7 +80,6 @@ def get_run_onnx(onnx_model: ModelProto):
   attribute_dict = {}
   for num,n in enumerate(onnx_model.graph.node):
     attribute_dict[num] = attribute_to_dict(n.attribute)
-    # print(n.attribute[0].t.data_type)
 
   onnx_model_version = onnx_model.opset_import[0].version
 
@@ -95,6 +94,7 @@ def get_run_onnx(onnx_model: ModelProto):
       if inp.name in tensors: continue
       tmp=inp.type.optional_type.elem_type.tensor_type if inp.type.HasField("optional_type") else (inp.type.sequence_type.elem_type.tensor_type if inp.type.HasField("sequence_type") else inp.type.tensor_type)
       shape = shape_to_tuple(tmp.shape)
+      if len(shape) >= 1: shape = tuple([x if x != 0 else 1 for x in shape])  # replace all dynamic dims with 1 for now
       if inp.name in inputs:
         if isinstance(inputs[inp.name], Tensor):
           input_tensors[inp.name] = inputs[inp.name]
@@ -102,13 +102,9 @@ def get_run_onnx(onnx_model: ModelProto):
           input_tensors[inp.name] = Tensor(inputs[inp.name], requires_grad=False)
         input_shape = input_tensors[inp.name].shape
         if input_shape == (0,): raise NotImplementedError("empty tensors aren't supported in tinygrad")
-
-        if len(shape) >= 1: shape = tuple([x if x != 0 else input_dim for x, input_dim in zip(shape, input_shape)]) # if input_shape is dynamic, replace with input_shape
-
         assert input_shape == shape, f"wrong shape for input {inp.name}, {input_shape} isn't {shape}"
         for _,v in input_tensors.items(): v.realize()
       else:
-        # todo fix names for shape. Or set zero to string 'dynamic'
         raise Exception(f"no data for {inp.name} with shape {shape}")
 
     def fetch_tensor(x: str):
@@ -124,8 +120,6 @@ def get_run_onnx(onnx_model: ModelProto):
         t = fetch_tensor(x)
         if debug: print(f"\t{x} - {t}")
         inp.append(t)
-      # print('inp types', [x.dtype if x is not None else '' for x in inp])
-      print('n.op_type', n.op_type)
       opt = attribute_dict[num]
       if debug: print(f"{num}: op {n.op_type} shape {[x.shape if isinstance(x, Tensor) else x for x in inp]} opt {opt}")
       # free ones
@@ -159,12 +153,11 @@ def get_run_onnx(onnx_model: ModelProto):
       elif n.op_type == "Gather":
         # TODO: is this correct? seems to work for simple gather ops
         axis = opt['axis'] if 'axis' in opt else 0
-        ret = inp[0].gather(inp[1], dim=axis)
-        # shape = list(inp[0].shape)
-        # indices = [shape[axis]+int(x) if x<0 else int(x) for x in safe_numpy(inp[1])]
-        # args = [[(0,x) if j != axis else (i,i+1) for j, x in enumerate(shape)] for i in indices]
-        # ret = inp[0].slice(arg=args[0]).cat(*[inp[0].slice(arg=arg) for arg in args[1:]], dim=axis)
-        # ret = ret.reshape([s for i,s in enumerate(shape) if i != axis]) if len(indices) == 1 else ret # squeeze if needed
+        shape = list(inp[0].shape)
+        indices = [shape[axis]+int(x) if x<0 else int(x) for x in safe_numpy(inp[1])]
+        args = [[(0,x) if j != axis else (i,i+1) for j, x in enumerate(shape)] for i in indices]
+        ret = inp[0].slice(arg=args[0]).cat(*[inp[0].slice(arg=arg) for arg in args[1:]], dim=axis)
+        ret = ret.reshape([s for i,s in enumerate(shape) if i != axis]) if len(indices) == 1 else ret # squeeze if needed
       elif n.op_type in ["Add", "Sub", "Mul", "Pow"]:
         if all(isinstance(x, Tensor) for x in inp) and (len(inp[0].shape) != len(inp[1].shape)) and (prod(inp[0].shape) == prod(inp[1].shape)):
           inp[1] = inp[1].reshape(inp[0].shape)
@@ -173,8 +166,7 @@ def get_run_onnx(onnx_model: ModelProto):
         if n.op_type == "Add": ret = inp[0] + inp[1]
         if n.op_type == "Sub": ret = inp[0] - inp[1]
         if n.op_type == "Mul": ret = inp[0] * inp[1]
-        if n.op_type == "Pow":
-          ret = (inp[0] ** inp[1]).cast(inp[0].dtype)
+        if n.op_type == "Pow": ret = (inp[0] ** inp[1]).cast(inp[0].dtype)
       elif n.op_type == "Split":
         if 'split' not in opt: opt['split'] = [int(x) for x in safe_numpy(inp[1])]  # split can be a tensor
         if 'axis' not in opt: opt['axis'] = 0
@@ -187,26 +179,21 @@ def get_run_onnx(onnx_model: ModelProto):
         continue
       elif n.op_type == "Slice":
         assert onnx_model_version >= 10, f'only onnx version >= 10 supported for slice'
-        shape_tensor = inp[0]
-        if isinstance(inp[0],list):
-          shape_tensor = Tensor.empty(*inp[0]) # has Variable shapes
-        arg = [(0,x) for x in shape_tensor.shape]
+        arg = [(0,x) for x in inp[0].shape]
         starts, ends = inp[1:3]
-        axes = safe_numpy(Tensor.arange(shape_tensor.ndim, dtype=dtypes.int32) if len(inp) <= 3 else inp[3])
+        axes = safe_numpy(Tensor.arange(inp[0].ndim, dtype=dtypes.int32) if len(inp) <= 3 else inp[3])
         steps = safe_numpy(inp[4])[0] if len(inp) > 4 else 1
-        starts, ends = safe_numpy(starts.cast(dtypes.int32)).tolist(), safe_numpy(ends.cast(dtypes.int32)).tolist() # TODO: when indexing is added use that
         starts, ends = safe_numpy(starts.cast(dtypes.int32)).tolist(), safe_numpy(ends.cast(dtypes.int32)).tolist() # TODO: when indexing is added use that
         for i,axis in enumerate(axes.tolist()):
           assert axis % 1 == 0
           axis = int(axis)
-          arg[axis] = (starts[i] if starts[i] >= 0 else shape_tensor.shape[axis]+starts[i], ends[i] if ends[i] >= 0 else shape_tensor.shape[axis]+ends[i])
-        ret = shape_tensor.slice(arg=arg)
+          arg[axis] = (starts[i] if starts[i] >= 0 else inp[0].shape[axis]+starts[i], ends[i] if ends[i] >= 0 else inp[0].shape[axis]+ends[i])
+        ret = inp[0].slice(arg=arg)
       elif n.op_type == "Shrink":
         bias = opt['bias'] if 'bias' in opt else 0
         ret = (inp[0] < -opt['lambd'])*(inp[0]+bias) + (inp[0] > opt['lambd'])*(inp[0]-bias)
       elif hasattr(onnx_ops, n.op_type):
         fxn = getattr(onnx_ops, n.op_type)
-        print("onnx ops", fxn)
         if isinstance(fxn, dict):
           for k in sorted(fxn.keys()):
             if k <= onnx_model_version:
@@ -224,11 +211,6 @@ def get_run_onnx(onnx_model: ModelProto):
       for i in range(len(n.output)):
         if debug: print(f"\t{n.output[i]} - {ret[i]}")
         intermediate_tensors[n.output[i]] = ret[i]
-        # if ret[i] is not None:
-        #   print('RET type', ret[i].dtype)
-          # if str(ret[i].dtype) == 'dtypes.float':
-          #   print("test")
-      # print()
       #print(ret[0].numpy().mean())
       if num == ONNXLIMIT:
         output_tensor_names = n.output

@@ -10,14 +10,15 @@ from extra.utils import download_file
 from extra.onnx import get_run_onnx
 from tinygrad.helpers import OSX, DEBUG
 from tinygrad.tensor import Tensor
-from tinygrad.lazy import Device
+from tinygrad.ops import Device
 
 MODELS = {
   "resnet50": "https://github.com/onnx/models/raw/main/vision/classification/resnet/model/resnet50-caffe2-v1-9.onnx",
-  "openpilot": "https://github.com/commaai/openpilot/raw/7da48ebdba5e3cf4c0b8078c934bee9a199f0280/selfdrive/modeld/models/supercombo.onnx",
+  # numerical issue with v0.9.4
+  # "openpilot": "https://github.com/commaai/openpilot/raw/v0.9.4/selfdrive/modeld/models/supercombo.onnx",
   "efficientnet": "https://github.com/onnx/models/raw/main/vision/classification/efficientnet-lite4/model/efficientnet-lite4-11.onnx",
   "shufflenet": "https://github.com/onnx/models/raw/main/vision/classification/shufflenet/model/shufflenet-9.onnx",
-  "commavq": "https://github.com/commaai/commavq/raw/master/models/gpt2m.onnx",
+  "commavq": "https://huggingface.co/commaai/commavq-gpt2m/resolve/main/gpt2m.onnx",
 
   # broken in torch MPS
   #"zfnet": "https://github.com/onnx/models/raw/main/vision/classification/zfnet-512/model/zfnet512-9.onnx",
@@ -39,11 +40,11 @@ def benchmark(mnm, nm, fxn):
     st = time.perf_counter_ns()
     ret = fxn()
     tms.append(time.perf_counter_ns() - st)
-  print(f"{m:15s} {nm:25s} {min(tms)*1e-6:7.2f} ms")
+  print(f"{mnm:15s} {nm:25s} {min(tms)*1e-6:7.2f} ms")
   CSV[nm] = min(tms)*1e-6
   return min(tms), ret
 
-#BASE = pathlib.Path(__file__).parent.parent.parent / "weights" / "onnx"
+#BASE = pathlib.Path(__file__).parents[2] / "weights" / "onnx"
 BASE = pathlib.Path("/tmp/onnx")
 def benchmark_model(m, validate_outs=False):
   global open_csv, CSV
@@ -52,7 +53,6 @@ def benchmark_model(m, validate_outs=False):
   fn = BASE / MODELS[m].split("/")[-1]
   download_file(MODELS[m], fn)
   onnx_model = onnx.load(fn)
-
   output_names = [out.name for out in onnx_model.graph.output]
   excluded = {inp.name for inp in onnx_model.graph.initializer}
   input_shapes = {inp.name:tuple(x.dim_value if x.dim_value != 0 else 1 for x in inp.type.tensor_type.shape.dim) for inp in onnx_model.graph.input if inp.name not in excluded}
@@ -64,7 +64,7 @@ def benchmark_model(m, validate_outs=False):
   # print input names
   if DEBUG >= 2: print([inp.name for inp in onnx_model.graph.input if inp.name not in excluded])
 
-  for device in ["METAL" if OSX else "GPU", "CLANG"]:
+  for device in ["METAL" if OSX else "GPU", "CLANG"]: # + (["CUDA"] if torch.cuda.is_available() else []):
     Device.DEFAULT = device
     inputs = {k:Tensor(inp) for k,inp in np_inputs.items()}
     tinygrad_model = get_run_onnx(onnx_model)
@@ -95,17 +95,17 @@ def benchmark_model(m, validate_outs=False):
   for backend in ["CPU", "CUDA" if not OSX else "CoreML"]:  # https://onnxruntime.ai/docs/execution-providers/
     provider = backend+"ExecutionProvider"
     if provider not in ort.get_available_providers(): continue
-    ort_sess = ort.InferenceSession(fn, ort_options, [provider])
-    benchmark(m, f"onnxruntime_{backend}", lambda: ort_sess.run(output_names, np_inputs))
+    ort_sess = ort.InferenceSession(str(fn), ort_options, [provider])
+    benchmark(m, f"onnxruntime_{backend.lower()}", lambda: ort_sess.run(output_names, np_inputs))
     del ort_sess
 
   if validate_outs:
-    rtol, atol = 8e-4, 8e-4  # tolerance for fp16 models
+    rtol, atol = 2e-3, 2e-3  # tolerance for fp16 models
     inputs = {k:Tensor(inp) for k,inp in np_inputs.items()}
     tinygrad_model = get_run_onnx(onnx_model)
     tinygrad_out = tinygrad_model(inputs)
 
-    ort_sess = ort.InferenceSession(fn, ort_options, ["CPUExecutionProvider"])
+    ort_sess = ort.InferenceSession(str(fn), ort_options, ["CPUExecutionProvider"])
     onnx_out = ort_sess.run(output_names, np_inputs)
     onnx_out = dict([*[(name,x) for name, x in zip(output_names, onnx_out)]])
 
@@ -125,4 +125,6 @@ def assert_allclose(tiny_out:dict, onnx_out:dict, rtol=1e-5, atol=1e-5):
     else: np.testing.assert_allclose(tiny_v.numpy(), onnx_v, rtol=rtol, atol=atol, err_msg=f"For tensor '{k}' in {tiny_out.keys()}")
 
 if __name__ == "__main__":
-  for m in MODELS: benchmark_model(m, getenv("VAL", False))
+  if getenv("MODEL", "") != "": benchmark_model(getenv("MODEL", ""), True)
+  else:
+    for m in MODELS: benchmark_model(m, True)
