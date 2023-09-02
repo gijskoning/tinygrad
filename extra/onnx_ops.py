@@ -111,7 +111,24 @@ def Dropout(data, ratio=0.5, training_mode=False, seed=None):
   mask = Tensor((rng.random(data.shape) >= ratio), requires_grad=False, device=data.device)
   return data * mask * (1/(1.0 - ratio)), mask
 
-def Shape(data, end=None, start=0): return Tensor(list(data.shape)[start:end], dtype=dtypes.int64)
+def Shape(data, end=None, start=0):
+  print("adapted ")
+  return Tensor(list(data.shape)[start:end], dtype=dtypes.int64)
+  #
+  # from tinygrad.shape.symbolic import Variable
+  # new_arr = list(data.shape)[start:end]
+  # for x in new_arr:
+  #   if isinstance(x, Variable):
+  #     # return new_arr
+  #     return Tensor(list(data.realize().shape)[start:end], dtype=dtypes.int64)
+  #
+  #
+  # return Tensor(new_arr, dtype=dtypes.int64) # doesnt work with variable
+  # new_shape = list(data.shape)[start:end]
+  # return Tensor(ret, dtype=dtypes.int64)#.reshape(new_shape)
+# def Shape(data, end=None, start=0):
+#   print("dt")
+#   return data.shape[start:end]
 def Size(data): return prod(data if isinstance(data, list) else data.shape)
 
 # TODO: this doesn't match Tensor.flatten behavior
@@ -201,8 +218,9 @@ def Tile(input, repeats):
   expand_shape = [x for r,s in zip(repeats_, input.shape) for x in [r,s]]
   final_shape = [r*s for r,s in zip(repeats_, input.shape)]
   return input.reshape(new_shape).expand(expand_shape).reshape(final_shape)
-
-def Range(start, limit, delta): return Tensor.arange(*[int(safe_numpy(x)[0]) for x in (start, limit, delta)])
+def Range(start, limit, delta):
+  print("Modified range to cast right dtype")
+  return Tensor.arange(*[int(safe_numpy(x)[0]) for x in (start, limit, delta)], dtype=delta.dtype)
 def Where(condition:Tensor,X:Tensor,Y:Tensor): return condition.where(X, Y).cast(X.dtype)
 
 def And(x:Tensor, y:Tensor): return Where((x==y), x, Tensor.zeros(*x.shape)).cast(dtypes.bool)
@@ -274,7 +292,7 @@ def EmbedLayerNormalization(input_ids, segment_ids:Optional[Tensor]=None, word_e
 
   def embedding(x:Tensor, vocab_size, weight:Tensor)->Tensor:  # TODO from nn.Embedding. Could probably upstream this to Tensor
     vocab_counter = Tensor.arange(vocab_size, requires_grad=False).reshape(1, 1, vocab_size).expand(*x.shape, vocab_size)
-    return (vocab_counter == x.unsqueeze(2).expand(*x.shape, vocab_size)) @ weight
+    return (vocab_counter == x.unsqueeze(2).expand(*x.shape, vocab_size)).cast(weight.dtype) @ weight
 
   # bert embedding layer
   if epsilon is None: epsilon = 1e-12
