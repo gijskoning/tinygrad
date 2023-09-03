@@ -216,7 +216,7 @@ class ShapeTracker:
     return self
 
   def shrink(self, arg: Tuple[Tuple[int, int], ...]):
-    assert all((b>=0 and e<=s) for s,(b,e) in zip(self.shape,arg)) and len(arg) == len(self.shape)
+    assert all((b>=0 and e<=s) for s,(b,e) in zip(self.shape,arg)) and len(arg) == len(self.shape), f"shape mismatch {arg} vs {self.shape}"
     self.__unsafe_resize(arg)
     return self
 
