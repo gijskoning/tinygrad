@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import trange
 
 np.set_printoptions(linewidth=200)
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 from tinygrad.helpers import Timing, getenv, dtypes, DEBUG
 from tinygrad.ops import GlobalCounters
@@ -38,7 +38,7 @@ class Attention:
     self.head_dim = dim // n_heads
 
   def __call__(self, x: Tensor, cache_k: Optional[Tensor], cache_v: Optional[Tensor], start_pos: int, mask: Optional[Tensor],
-               jit_ctx: Optional[Dict[Variable, int]] = None) -> Tensor:
+               jit_ctx: Optional[Dict[Variable, int]] = None) -> Tuple[Tensor, Tensor, Tensor]:
     xqkv = self.c_attn(x)
     xq, xk, xv = [xqkv.slice([None, None, (i * self.dim, (i + 1) * self.dim)]) for i in range(3)]
     xq, xk, xv = [x.reshape(x.shape[0], x.shape[1], self.n_heads, self.head_dim) for x in (xq, xk, xv)]
