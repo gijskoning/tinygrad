@@ -134,7 +134,14 @@ class TestDiskTensor(unittest.TestCase):
     print(cc[3:5].numpy())
     cc[3:5].assign([13, 12]).realize()
     print(cc.numpy())
-
+    
+  def test_cast_fp16(self):
+    pathlib.Path(temp("dt6")).unlink(missing_ok=True)
+    arr = Tensor.arange(10, device="CPU")
+    disk_fp16 = arr.to(f"disk:{temp('dt6')}").cast(dtypes.float16).numpy()
+    cpu_fp16 = arr.cast(dtypes.float16).numpy()
+    np.testing.assert_allclose(disk_fp16, cpu_fp16)
+    
 if __name__ == "__main__":
   unittest.main()
 
