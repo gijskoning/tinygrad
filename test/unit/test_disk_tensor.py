@@ -126,6 +126,13 @@ class TestDiskTensor(unittest.TestCase):
     print(tst)
     np.testing.assert_allclose(tst, np.arange(10, 20))
 
+  def test_cast_fp16(self):
+    pathlib.Path(temp("dt5")).unlink(missing_ok=True)
+    arr = Tensor.arange(10, device="CPU")
+    disk_fp16 = arr.to(f"disk:{temp('dt5')}").cast(dtypes.float16).numpy()
+    cpu_fp16 = arr.cast(dtypes.float16).numpy()
+    np.testing.assert_allclose(disk_fp16, cpu_fp16)
+
   def test_assign_slice(self):
     pathlib.Path(temp("dt4")).unlink(missing_ok=True)
     cc = Tensor.arange(10, device="CPU").to(f"disk:{temp('dt4')}").realize()
@@ -137,4 +144,3 @@ class TestDiskTensor(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
-
