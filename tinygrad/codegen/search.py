@@ -3,8 +3,7 @@ import time
 from tinygrad.codegen.linearizer import Linearizer
 from tinygrad.helpers import DEBUG, prod, getenv
 
-def get_divisors(n, min_div = 1, max_div = 512):
-  if min_div > 1: yield 1
+def get_divisors(n, min_div = 2, max_div = 512):
   for d in range(min_div, min(max_div, n//2) + 1):
     if n % d == 0: yield d
 
