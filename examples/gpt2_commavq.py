@@ -109,10 +109,9 @@ class Transformer:
     self.h_jitted_start = [TinyJit(h.__call__) for h in self.h]
 
   def embed(self, tokens, pos):
-    tok_emb = self.wte(tokens)
-    pos_emb = self.wpe(pos)
+    tok_emb = self.wte(tokens).cast(dtypes.float16)
+    pos_emb = self.wpe(pos).cast(dtypes.float16)
     h = tok_emb + pos_emb
-    # h = h.cast(dtypes.float16)
     return h.realize()
 
   def postprocess(self, x, temperature: Optional[float]):
@@ -129,10 +128,8 @@ class Transformer:
       pos.lazydata.st.var_vals[start_pos_var] = start_pos
       if start_pos == 0:
         self.kv_caches = [(None, None) for _ in range(self.n_layers)]
-        print("Start")
         embed_jitted, h_jitted, postprocess_jitted = self.embed_jitted_start, self.h_jitted_start, self.postprocess_jitted_start
-        # todo not sure if mask is allowed to be of half dtype
-        mask = Tensor.full((1, 1, seqlen, start_pos + seqlen), float("-inf"), dtype=dtypes.float32).triu(start_pos + 1).realize()
+        mask = Tensor.full((1, 1, seqlen, start_pos + seqlen), float("-inf"), dtype=self.wte.weight.dtype).triu(start_pos + 1).realize()
       else:
         print("Continue > 0")
         assert seqlen == 1
@@ -142,7 +139,6 @@ class Transformer:
 
       for i, (hi, (cache_k, cache_v)) in enumerate(zip(h_jitted, self.kv_caches)):
         h, cache_k, cache_v = hi(h, cache_k, cache_v, start_pos=start_pos, mask=mask, jit_ctx={start_pos_var: start_pos})
-        # h = h.cast(dtypes.float16)
         self.kv_caches[i] = (cache_k, cache_v)
       return postprocess_jitted(h, temperature)
     else:
@@ -195,8 +191,8 @@ class GPT2:
     weights['lm_head.weight'] = Tensor(weights['wte.weight'].numpy())
     # weights['lm_head.weight'] = Tensor(weights['transformer.wte.weight'].numpy())
     if getenv("FP16"):  # todo create pr for this
-      for k, v in weights.items():
-        weights[k] = v.cast(dtypes.float16).realize()
+      for k,v in weights.items():
+        weights[k] = v.cpu().cast(dtypes.float16).realize()
     load_state_dict(model, weights)
     return GPT2(model, tokenizer)
 
