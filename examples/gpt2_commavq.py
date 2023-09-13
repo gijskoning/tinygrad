@@ -83,8 +83,8 @@ class TransformerBlock:
       cache_k = cache_k.reshape(cache_k.shape[0], start_pos_var, cache_k.shape[2], cache_k.shape[3])
       cache_v = cache_v.reshape(cache_v.shape[0], start_pos_var, cache_v.shape[2], cache_v.shape[3])
       # need this because we don't reshape back to int shape in the jitted path and we don't have the correct var_vars in cache
-      cache_k.lazydata.st.var_vals[start_pos_var] = start_pos
-      cache_v.lazydata.st.var_vals[start_pos_var] = start_pos
+      cache_k.lazydata.var_vals[start_pos_var] = start_pos
+      cache_v.lazydata.var_vals[start_pos_var] = start_pos
 
     output, cache_k, cache_v = self.attn(self.ln_1(x), cache_k, cache_v, start_pos, mask, jit_ctx=jit_ctx)
     h = x + output
@@ -96,6 +96,7 @@ class Transformer:
     self.wte = Embedding(vocab_size, dim)
     self.wpe = Embedding(max_seq_len, dim)
     self.h = [TransformerBlock(dim, n_heads, norm_eps, linear) for _ in range(n_layers)]
+    self.kv_caches = None
     self.ln_f = LayerNorm(dim, norm_eps)
     self.lm_head = linear(dim, vocab_size, bias=False)
     self.n_layers = n_layers
@@ -125,7 +126,7 @@ class Transformer:
     if getenv("JIT"):
       start_pos_var = Variable("start_pos", 0, MAX_CONTEXT)
       pos = self.allpos.shrink(((0, self.allpos.shape[0]), (start_pos_var, start_pos_var + seqlen)))
-      pos.lazydata.st.var_vals[start_pos_var] = start_pos
+      pos.lazydata.var_vals[start_pos_var] = start_pos
       if start_pos == 0:
         self.kv_caches = [(None, None) for _ in range(self.n_layers)]
         embed_jitted, h_jitted, postprocess_jitted = self.embed_jitted_start, self.h_jitted_start, self.postprocess_jitted_start
