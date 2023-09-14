@@ -15,6 +15,7 @@ from tinygrad.tensor import Tensor
 from tinygrad.nn import Embedding, Linear
 from tinygrad.jit import TinyJit
 from tinygrad.shape.symbolic import Variable
+
 model_file = '/home/gijs/code_projects/commavq/models/pytorch_model.bin'
 MAX_CONTEXT = 20 * 129  # comma
 
@@ -77,7 +78,7 @@ class TransformerBlock:
     self.ln_2 = LayerNorm(dim, norm_eps)
 
   def __call__(self, x: Tensor, cache_k: Optional[Tensor], cache_v: Optional[Tensor], start_pos: int, mask: Optional[Tensor],
-               jit_ctx: Optional[Dict[Variable, int]] = None):
+               jit_ctx: Optional[Dict[Variable, int]] = None, realize=True):
     if start_pos > 0 and mask is None and getenv("JIT"):
       start_pos_var = Variable("start_pos", 1, MAX_CONTEXT)
       cache_k = cache_k.reshape(cache_k.shape[0], start_pos_var, cache_k.shape[2], cache_k.shape[3])
@@ -88,7 +89,11 @@ class TransformerBlock:
 
     output, cache_k, cache_v = self.attn(self.ln_1(x), cache_k, cache_v, start_pos, mask, jit_ctx=jit_ctx)
     h = x + output
-    return (h + self.mlp(self.ln_2(h))).realize(), cache_k.realize(), cache_v.realize()
+    h = (h + self.mlp(self.ln_2(h)))
+    if realize:
+      return h.realize(), cache_k.realize(), cache_v.realize()
+    return h, cache_k, cache_v
+    # return (h + self.mlp(self.ln_2(h))).realize(), cache_k.realize(), cache_v.realize()
 
 
 class Transformer:
@@ -109,10 +114,26 @@ class Transformer:
     self.postprocess_jitted_start = TinyJit(self.postprocess)
     self.h_jitted_start = [TinyJit(h.__call__) for h in self.h]
 
-  def embed(self, tokens, pos):
+    self.bigger_jit_jit = TinyJit(self.bigger_jit)
+
+  def bigger_jit(self, tokens, pos, start_pos, kv_caches, jit_ctx: Optional[Dict[Variable, int]] = None):
+    h = self.embed(tokens, pos, realize=False)
+
+    for i, (hi, (cache_k, cache_v)) in enumerate(zip(self.h, kv_caches)):
+      h, cache_k, cache_v = hi(h, cache_k, cache_v, start_pos=start_pos, mask=None, jit_ctx=jit_ctx, realize=False)
+      kv_caches[i] = (cache_k, cache_v)
+    logits = self.lm_head(self.ln_f(h)).realize()
+
+    for i in range(len(kv_caches)):
+      kv_caches[i] = (kv_caches[i][0].realize(), kv_caches[i][1].realize())
+    return logits, kv_caches
+
+  def embed(self, tokens, pos, realize=True):
     tok_emb = self.wte(tokens).cast(dtypes.float16)
     pos_emb = self.wpe(pos).cast(dtypes.float16)
     h = tok_emb + pos_emb
+    if not realize:
+      return h
     return h.realize()
 
   def postprocess(self, x, temperature: Optional[float]):
@@ -131,16 +152,19 @@ class Transformer:
         self.kv_caches = [(None, None) for _ in range(self.n_layers)]
         embed_jitted, h_jitted, postprocess_jitted = self.embed_jitted_start, self.h_jitted_start, self.postprocess_jitted_start
         mask = Tensor.full((1, 1, seqlen, start_pos + seqlen), float("-inf"), dtype=self.wte.weight.dtype).triu(start_pos + 1).realize()
+
+        h = embed_jitted(tokens, pos)
+
+        for i, (hi, (cache_k, cache_v)) in enumerate(zip(h_jitted, self.kv_caches)):
+          h, cache_k, cache_v = hi(h, cache_k, cache_v, start_pos=start_pos, mask=mask, jit_ctx={start_pos_var: start_pos})
+          self.kv_caches[i] = (cache_k, cache_v)
       else:
         print("Continue > 0")
         assert seqlen == 1
-        embed_jitted, h_jitted, postprocess_jitted = self.embed_jitted, self.h_jitted, self.postprocess_jitted
-        mask = None
-      h = embed_jitted(tokens, pos)
-
-      for i, (hi, (cache_k, cache_v)) in enumerate(zip(h_jitted, self.kv_caches)):
-        h, cache_k, cache_v = hi(h, cache_k, cache_v, start_pos=start_pos, mask=mask, jit_ctx={start_pos_var: start_pos})
-        self.kv_caches[i] = (cache_k, cache_v)
+        # embed_jitted, h_jitted, postprocess_jitted = self.embed_jitted, self.h_jitted, self.postprocess_jitted
+        # mask = None
+        logits, self.kv_caches = self.bigger_jit_jit(tokens, pos, start_pos, self.kv_caches, jit_ctx={start_pos_var: start_pos})
+        return logits
       return postprocess_jitted(h, temperature)
     else:
       pos = self.allpos.shrink(((0, self.allpos.shape[0]), (start_pos, start_pos + seqlen)))
@@ -191,7 +215,7 @@ class GPT2:
     weights['lm_head.weight'] = Tensor(weights['wte.weight'].numpy())
     # weights['lm_head.weight'] = Tensor(weights['transformer.wte.weight'].numpy())
     if getenv("FP16"):  # todo create pr for this
-      for k,v in weights.items():
+      for k, v in weights.items():
         weights[k] = v.cpu().cast(dtypes.float16).realize()
     load_state_dict(model, weights)
     return GPT2(model, tokenizer)
