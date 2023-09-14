@@ -15,7 +15,7 @@ from tinygrad.tensor import Tensor
 from tinygrad.nn import Embedding, Linear
 from tinygrad.jit import TinyJit
 from tinygrad.shape.symbolic import Variable
-
+model_file = '/home/gijs/code_projects/commavq/models/pytorch_model.bin'
 MAX_CONTEXT = 20 * 129  # comma
 
 
@@ -174,14 +174,13 @@ class GPT2:
   def build(model_size="comma_gpt2", max_seq_len=2580):
     import tiktoken
     from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict
-    from extra.utils import fetch_as_file
     tokenizer = tiktoken.get_encoding("gpt2")
     # JIT=1 python examples/gpt2.py --prompt="Hello." --count=10 --temperature=0 --timing
     params = MODEL_PARAMS[model_size]
     # model = Transformer(**params, max_seq_len=1024)
     model = Transformer(**params, max_seq_len=max_seq_len)
     # weights = torch_load(fetch_as_file(get_url(model_size)))
-    weights = torch_load('/home/gijs/code_projects/commavq/models/pytorch_model.bin')
+    weights = torch_load(model_file)
     weights = {k.replace("transformer.", ""): v for k, v in weights.items()}
     # special treatment for the Conv1D weights we need to transpose
     transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
