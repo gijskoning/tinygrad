@@ -5,14 +5,14 @@ import functools, argparse
 import numpy as np
 from tqdm import trange
 np.set_printoptions(linewidth=200)
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 from tinygrad.helpers import Timing, getenv, dtypes, DEBUG
 from tinygrad.ops import GlobalCounters
 from tinygrad.ops import Device
 from tinygrad.tensor import Tensor
 from tinygrad.nn import Embedding, Linear
-from tinygrad.jit import TinyJit
+from tinygrad.jit import TinyJit, JitCtx
 from tinygrad.shape.symbolic import Variable
 
 MAX_CONTEXT = 128
@@ -34,7 +34,7 @@ class Attention:
     self.dim = dim
     self.head_dim = dim // n_heads
 
-  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, mask:Optional[Tensor], jit_ctx:Optional[Dict[Variable,int]]=None) -> Tensor:
+  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, mask:Optional[Tensor], jit_ctx:Optional[JitCtx]=None) -> Tensor:
     xqkv = self.c_attn(x)
     xq, xk, xv = [xqkv.slice([None, None, (i*self.dim, (i+1)*self.dim)]) for i in range(3)]
     xq, xk, xv = [x.reshape(x.shape[0], x.shape[1], self.n_heads, self.head_dim) for x in (xq, xk, xv)]
@@ -70,7 +70,7 @@ class TransformerBlock:
     self.ln_1 = LayerNorm(dim, norm_eps)
     self.ln_2 = LayerNorm(dim, norm_eps)
 
-  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, mask:Optional[Tensor], jit_ctx:Optional[Dict[Variable,int]]=None):
+  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, mask:Optional[Tensor], jit_ctx:Optional[JitCtx]=None):
     if start_pos > 0 and mask is None and getenv("JIT"):
       start_pos_var = Variable("start_pos", 1, MAX_CONTEXT)
       cache_k = cache_k.reshape(cache_k.shape[0], start_pos_var, cache_k.shape[2], cache_k.shape[3])
@@ -112,11 +112,12 @@ class Transformer:
     if not hasattr(self, 'allpos'): self.allpos = Tensor.arange(0, MAX_CONTEXT).reshape(1, -1).realize()
     if seqlen == 1 and start_pos > 0 and getenv("JIT"):
       start_pos_var = Variable("start_pos", 1, MAX_CONTEXT)
+      jit_ctx = JitCtx({start_pos_var: start_pos})
       pos = self.allpos.shrink(((0, self.allpos.shape[0]), (start_pos_var, start_pos_var+seqlen)))
       pos.lazydata.var_vals[start_pos_var] = start_pos
       h = self.embed_jitted(tokens, pos)
       for i, (hi, (cache_k, cache_v)) in enumerate(zip(self.h_jitted, self.kv_caches)):
-        h, cache_k, cache_v = hi(h, cache_k, cache_v, start_pos=start_pos, mask=None, jit_ctx={start_pos_var: start_pos})
+        h, cache_k, cache_v = hi(h, cache_k, cache_v, start_pos=start_pos, mask=None, jit_ctx=jit_ctx)
         self.kv_caches[i] = (cache_k, cache_v)
       return self.postprocess_jitted(h, temperature)
     else:

@@ -1,5 +1,5 @@
 import unittest
-from tinygrad.jit import TinyJit
+from tinygrad.jit import TinyJit, JitCtx
 from tinygrad.helpers import getenv
 from tinygrad.shape.symbolic import Variable
 from tinygrad.tensor import Tensor, Device
@@ -26,8 +26,9 @@ class TestSymbolicJit(unittest.TestCase):
       return (a+1).realize()
     jf = TinyJit(f)
     for i in range(1, 5):
+      jit_ctx = JitCtx({vi: i})
       a = Tensor.rand(3, i)
-      symbolic = jf(a, jit=True, jit_ctx={vi: i}).reshape(3, i).numpy()
+      symbolic = jf(a, jit=True, jit_ctx=jit_ctx).reshape(3, i).numpy()
       expected = f(a).numpy()
       np.testing.assert_allclose(symbolic, expected, atol=1e-6, rtol=1e-6)
     assert len(jf.jit_cache) == 1
