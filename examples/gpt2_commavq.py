@@ -2,9 +2,12 @@
 # pip3 install tiktoken
 
 import functools, argparse
+import os
+
 import numpy as np
 from tqdm import trange
-
+os.environ['JIT'] = '1'
+os.environ['FP16'] = '1'
 np.set_printoptions(linewidth=200)
 from typing import Optional, Dict, Tuple
 
@@ -237,7 +240,8 @@ class GPT2:
                                                           f", {GlobalCounters.global_mem * 1e-9 / (GlobalCounters.time_sum_s - st):.2f} GB/s") if DEBUG else None,
                     enabled=timing):
           probs = self.model(Tensor([toks[start_pos:]]), start_pos, temperature)
-        probs_np = probs.numpy()
+        probs_np = probs.relu().numpy().squeeze()
+        probs_np = probs_np / probs_np.sum() # todo temp fix just to run this
         tok = int(np.random.choice(len(probs_np), p=probs_np))
       start_pos = len(toks)
       toks.append(tok)
