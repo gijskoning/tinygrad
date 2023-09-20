@@ -255,7 +255,7 @@ if __name__ == "__main__":
   parser.add_argument('--prompt', type=str, default="What is the answer to life, the universe, and everything?", help="Phrase to start with")
   parser.add_argument('--count', type=int, default=100, help="Max number of tokens to generate")
   parser.add_argument('--temperature', type=float, default=0.8, help="Temperature in the softmax")
-  parser.add_argument('--model_size', type=str, default="gpt2-medium", help="Size of model to use [gpt2, gpt2-medium, gpt2-large, gpt2-xl]")
+  parser.add_argument('--model_size', type=str, default="comma_gpt2", help="Size of model to use [gpt2, gpt2-medium, gpt2-large, gpt2-xl]")
   parser.add_argument('--timing', action='store_true', help="Print timing per token")
   args = parser.parse_args()
 
