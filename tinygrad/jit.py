@@ -34,7 +34,7 @@ class TinyJit:
     assert len(input_rawbuffers) != 0, "no inputs to JIT"
     assert len(set(input_rawbuffers.values())) == len(input_rawbuffers), "duplicate inputs to JIT"
     if self.cnt >= 2:
-      if "jit_ctx" in kwargs: var_vals, symbolic_cache = kwargs["jit_ctx"].var_vals, kwargs["jit_ctx"].cache
+      if "jit_ctx" in kwargs and kwargs["jit_ctx"] is not None: var_vals, symbolic_cache = cast(JitCtx, kwargs["jit_ctx"]).var_vals, cast(JitCtx, kwargs["jit_ctx"]).cache
       else: var_vals, symbolic_cache = merge_dicts([arg.lazydata.var_vals for arg in args if arg.__class__ is Tensor]), None
       if len(var_vals) > 1: var_vals = dict(sorted(var_vals.items(), key=lambda kv: kv[0].key))
       for (j,i),(input_name, expected_st, expected_type) in self.input_replace.items():
@@ -44,7 +44,7 @@ class TinyJit:
         self.jit_cache[j][1][i] = input_rawbuffers[input_name][0]
 
       if self.batch_executor:
-        for j in self.changed_arguments.keys(): # type: ignore
+        for j in self.changed_arguments.keys():
           prg, pargs, variables = self.jit_cache[j]
           for k in variables.keys():
             try: variables[k] = var_vals[k]
@@ -52,7 +52,7 @@ class TinyJit:
           self.batch_executor.update(j, *prg.launch_dims(variables, symbolic_cache=symbolic_cache), *pargs, *variables.values(), updated_args=self.changed_arguments[j])
         self.batch_executor.exec()
         if not NOSTAT:
-          for j,(prg, pargs, variables) in enumerate(self.jit_cache): prg.update_stat_after_call(var_vals=variables) # type: ignore
+          for j,(prg, pargs, variables) in enumerate(self.jit_cache): prg.update_stat_after_call(var_vals=variables, symbolic_cache=symbolic_cache) # type: ignore
       else:
         for prg, pargs, variables in self.jit_cache: # type: ignore
           for k in variables.keys():

@@ -178,5 +178,17 @@ class TestSymbolicJit(unittest.TestCase):
       np.testing.assert_allclose(symbolic, expected, atol=1e-6, rtol=1e-6)
     assert len(jf.jit_cache) == 1
 
+  def test_none_jit_ctx(self):
+    def f(a, b, jit_ctx=None): return (a+b).realize()
+    jf = TinyJit(f)
+    vi = Variable("i", 1, 10)
+    for i in range(1, 5):
+      a = Tensor.rand(3, i)
+      b = Tensor.rand(3, i)
+      symbolic = jf(a.reshape(3, vi), b.reshape(3, vi), jit_ctx=None).reshape(3, i).numpy()
+      expected = f(a, b).numpy()
+      np.testing.assert_allclose(symbolic, expected, atol=1e-6, rtol=1e-6)
+    assert len(jf.jit_cache) == 1
+
 if __name__ == '__main__':
   unittest.main()

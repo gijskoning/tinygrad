@@ -171,8 +171,8 @@ class ASTRunner:
     self.update_stat_after_call(op_estimate=op_estimate)
     return et
 
-  def update_stat_after_call(self, var_vals=None, op_estimate=None):
-    if op_estimate is None: op_estimate = sym_infer(self.op_estimate, var_vals)
+  def update_stat_after_call(self, var_vals=None, op_estimate=None, symbolic_cache=None):
+    if op_estimate is None: op_estimate = sym_infer(self.op_estimate, var_vals, symbolic_cache)
     GlobalCounters.kernel_count += 1
     GlobalCounters.global_ops += op_estimate
     GlobalCounters.global_mem += self.mem_estimate
