@@ -3,7 +3,7 @@ from weakref import ref
 from collections import defaultdict
 import functools, itertools
 from tinygrad.helpers import DEBUG, DType, merge_dicts
-from tinygrad.ops import RawBuffer, Device, ASTRunner
+from tinygrad.ops import RawBuffer, Device, Compiled
 from tinygrad.tensor import Tensor
 from tinygrad.shape.shapetracker import ShapeTracker
 from tinygrad.shape.symbolic import Variable
@@ -67,11 +67,9 @@ class TinyJit:
         #if prg.local_size is None: prg.local_size = prg.optimize_local_size(args, preserve_output=True)  # the JIT can optimize local
       assert set([x[0] for x in self.input_replace.values()]) == set(input_rawbuffers.keys()), "some input tensors not found"
 
-      # init batch executor
-      batch_executors = list(set([prg.batch_exec if isinstance(prg, ASTRunner) else None for prg,_,_ in self.jit_cache]))
-      if len(batch_executors) == 1 and batch_executors[0] is not None: # Should contain only ASTRunner.
-        try: self.batch_executor = batch_executors[0](self.jit_cache)
-        except ValueError: self.batch_executor = None
+      # init batch_executor
+      try: self.batch_executor = cast(Compiled, Device[Device.DEFAULT]).batch_exec(self.jit_cache)
+      except (ValueError, TypeError): self.batch_executor = None
       for (j,i) in self.input_replace.keys(): self.jit_cache[j][1][i] = None
     elif self.cnt == 0:
       self.ret = self.fxn(*args, **kwargs)
