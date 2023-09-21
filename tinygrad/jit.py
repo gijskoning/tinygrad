@@ -3,7 +3,7 @@ from weakref import ref
 from collections import defaultdict
 import functools, itertools
 from tinygrad.helpers import DEBUG, DType, merge_dicts
-from tinygrad.ops import RawBuffer, Device, ASTRunner, BatchExecutor
+from tinygrad.ops import RawBuffer, Device, ASTRunner
 from tinygrad.tensor import Tensor
 from tinygrad.shape.shapetracker import ShapeTracker
 from tinygrad.shape.symbolic import Variable
@@ -21,7 +21,7 @@ class TinyJit:
     self.jit_cache: List[Tuple[Any, List[Optional[RawBuffer]], Dict[Variable, int]]] = []
     self.ret: Any = None
     self.input_replace: Dict[Tuple[int, int], Tuple[Union[int, str], ShapeTracker, DType]]= {}   # (kernel_number, buffer_number) -> (input_name, expected_shapetracker, expected_type)
-    self.batch_executor: Optional[BatchExecutor] = None
+    self.batch_executor: Optional[Any] = None
     self.updatable_entries: Dict[int, List[int]] = defaultdict(list) # (kernel_number) -> list(argument id). These are buffers from input + variables.
 
   # add support for instance methods
@@ -46,8 +46,7 @@ class TinyJit:
         for k in self.jit_cache[j][2].keys():
           try: self.jit_cache[j][2][k] = var_vals[k]
           except KeyError: pass
-        if self.batch_executor: self.batch_executor.update(j, *self.jit_cache[j], updated_args=self.updatable_entries[j], symbolic_cache=symbolic_cache)
-      if self.batch_executor: self.batch_executor.exec()
+      if self.batch_executor: self.batch_executor.exec(self.jit_cache, self.updatable_entries, symbolic_cache=symbolic_cache)
       else:
         for prg, pargs, variables in self.jit_cache: prg(pargs, variables, jit=True) # type: ignore
       for (j,i) in self.input_replace.keys(): self.jit_cache[j][1][i] = None
@@ -70,11 +69,9 @@ class TinyJit:
 
       # init batch executor
       batch_executors = list(set([prg.batch_exec if isinstance(prg, ASTRunner) else None for prg,_,_ in self.jit_cache]))
-      if len(batch_executors) == 1 and batch_executors[0] != None: # Should contain only ASTRunner.
-        self.batch_executor = batch_executors[0]()
-        for j,(prg, pargs, variables) in enumerate(self.jit_cache): # type: ignore
-          self.batch_executor.capture(prg, pargs, variables)
-        if not self.batch_executor.instantiate(): self.batch_executor = None # Batch executor init failed, don't use it.
+      if len(batch_executors) == 1 and batch_executors[0] is not None: # Should contain only ASTRunner.
+        try: self.batch_executor = batch_executors[0](self.jit_cache)
+        except ValueError: self.batch_executor = None
       for (j,i) in self.input_replace.keys(): self.jit_cache[j][1][i] = None
     elif self.cnt == 0:
       self.ret = self.fxn(*args, **kwargs)

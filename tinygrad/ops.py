@@ -134,12 +134,6 @@ def get_lazyop_info(ast:LazyOp) -> FlopCounter: return InterpretedFlopCounter.ex
 from tinygrad.runtime.lib import RawBuffer, RawConst, buf_is_kernel_arg
 from tinygrad.shape.symbolic import Variable, sym_infer
 
-class BatchExecutor:
-  def capture(self, prg, pargs, variables) -> int: raise NotImplementedError("must be implemented")
-  def instantiate(self) -> bool: raise NotImplementedError("must be implemented")
-  def update(self, nodeid, prg, pargs, variables, symbolic_cache=None, updated_args=None): raise NotImplementedError("must be implemented")
-  def exec(self): raise NotImplementedError("must be implemented")
-
 class ASTRunner:
   def __init__(self, name, prg, global_size:Optional[List[int]]=None, local_size:Optional[List[int]]=None, op_estimate=0, mem_estimate=0, display_name:Optional[str]=None, runtime_args:Optional[dict]=None):
     if DEBUG >= 4 and (runtime_args is None or 'binary' not in runtime_args or not runtime_args['binary']): print(prg)
