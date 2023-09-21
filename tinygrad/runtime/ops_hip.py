@@ -2,11 +2,12 @@ import numpy as np
 import ctypes, functools
 import extra.hip_wrapper as hip
 from typing import Tuple, Any, List
-from tinygrad.helpers import DEBUG, getenv
+from tinygrad.helpers import DEBUG, getenv, NOSTAT, GlobalCounters
 from tinygrad.ops import Compiled, BatchExecutor
 from tinygrad.runtime.lib import RawBufferCopyInOut, LRUAllocator, RawBufferTransfer
 from tinygrad.codegen.kernel import LinearizerOptions
 from tinygrad.renderer.cstyle import uops_to_cstyle, CStyleLanguage
+from tinygrad.shape.symbolic import sym_infer
 
 # TODO: if you fork and exit the child process after creating anything with cl on AMD, it hangs on e.wait()
 if DEBUG >= 6:
@@ -33,41 +34,44 @@ class HIPGraph(BatchExecutor):
   def __init__(self):
     self.info: List[Tuple[Any, ...]] = []
     self.capture_stream, self.last_devid, self.graph, self.instance, self.failed = None, None, None, None, False
-
   def __del__(self):
     if self.capture_stream: hip.hipStreamDestroy(self.capture_stream)
     if self.instance: hip.hipGraphExecDestroy(self.instance)
     if self.graph: hip.hipGraphDestroy(self.graph)
-
-  def capture(self, prg, global_size, local_size, *args) -> int: # Returns nodeid
-    devid = args[0]._device
+  def capture(self, prg, pargs, variables) -> int: # Returns nodeid
     if self.capture_stream is None:
       self.capture_stream = hip.hipStreamCreate()
       hip.hipStreamBeginCapture(self.capture_stream)
-
-    # TODO: Support multidevice graph. Need to add manual sync between graphs and copy support (_send_rb, _recv_rb)
-    if self.last_devid is not None and devid != self.last_devid: self.failed = True
+    devid = pargs[0]._device
+    if self.last_devid is not None and devid != self.last_devid: self.failed = True # TODO: Support multidevice graph. Need to add manual sync between graphs and copy support (_send_rb, _recv_rb)
     self.last_devid = devid
 
     # Adding new node to graph
     hip.hipSetDevice(devid)
     _, _, graph, deps = hip.hipStreamGetCaptureInfo_v2(self.capture_stream)
-    params = hip.buildKernelNodeParams(*args, func=prg.prgs[devid], grid=global_size, block=local_size)
+    global_size, local_size = prg.launch_dims(variables)
+    params = hip.buildKernelNodeParams(*pargs, *variables.values(), func=prg.clprg.prgs[devid], grid=global_size, block=local_size)
     graph_node = hip.hipGraphAddKernelNode(graph, deps, params)
     hip.hipStreamUpdateCaptureDependencies(self.capture_stream, [graph_node], 1)
-
-    self.info.append((graph_node, params))
+    self.info.append((graph_node, params, prg.mem_estimate, sym_infer(prg.op_estimate, variables)))
     return len(self.info) - 1
   def instantiate(self) -> bool: # Returns True if successful
     assert self.last_devid is not None, "Nothing captured?"
     self.graph = hip.hipStreamEndCapture(self.capture_stream) # Only one graph is supported now
     self.instance = hip.hipGraphInstantiate(self.graph)
     return not self.failed
-  def update(self, nodeid, global_size, local_size, *args, updated_args=None):
-    graph_node, params = self.info[nodeid]
-    hip.updateKernelNodeParams(params, *args, grid=global_size, block=local_size, updated_args=updated_args)
+  def update(self, nodeid, prg, pargs, variables, symbolic_cache=None, updated_args=None):
+    graph_node, params, _, _ = self.info[nodeid]
+    global_size, local_size = prg.launch_dims(variables, symbolic_cache=symbolic_cache)
+    hip.updateKernelNodeParams(params, *pargs, *variables.values(), grid=global_size, block=local_size, updated_args=updated_args)
     hip.hipGraphExecKernelNodeSetParams(self.instance, graph_node, params)
-  def exec(self): hip.hipGraphLaunch(self.instance)
+    if not NOSTAT: self.info[nodeid] = (graph_node, params, prg.mem_estimate, sym_infer(prg.op_estimate, variables, symbolic_cache=symbolic_cache))
+  def exec(self):
+    hip.hipGraphLaunch(self.instance)
+    if not NOSTAT:
+      GlobalCounters.kernel_count += len(self.info)
+      GlobalCounters.global_ops += sum(x[3] for x in self.info)
+      GlobalCounters.global_mem += sum(x[2] for x in self.info)
 
 class RawHIPBuffer(RawBufferCopyInOut, RawBufferTransfer):
   def __init__(self, size, dtype, device=str(HIP.default_device)): super().__init__(size, dtype, allocator=HIP.allocator, **{'device': int(device)})

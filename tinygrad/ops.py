@@ -135,9 +135,9 @@ from tinygrad.runtime.lib import RawBuffer, RawConst, buf_is_kernel_arg
 from tinygrad.shape.symbolic import Variable, sym_infer
 
 class BatchExecutor:
-  def capture(self, prg, global_size, local_size, *args) -> int: raise NotImplementedError("must be implemented")
+  def capture(self, prg, pargs, variables) -> int: raise NotImplementedError("must be implemented")
   def instantiate(self) -> bool: raise NotImplementedError("must be implemented")
-  def update(self, nodeid, global_size, local_size, *args, updated_args=None): raise NotImplementedError("must be implemented")
+  def update(self, nodeid, prg, pargs, variables, symbolic_cache=None, updated_args=None): raise NotImplementedError("must be implemented")
   def exec(self): raise NotImplementedError("must be implemented")
 
 class ASTRunner:
@@ -168,14 +168,10 @@ class ASTRunner:
     if DEBUG >= 2:
       print(f"{colored(f'*** {GlobalCounters.kernel_count:4d}', 'magenta' if jit else None)} {(self.display_name+' '*(33-ansilen(self.display_name))) if self.display_name is not None else self.name:33s} arg {len(rawbufs):3d} sz {str(global_size):18s} {str(local_size):12s} OPs {int(op_estimate/1e6):6d}M/{GlobalCounters.global_ops/1e9:7.2f}G  mem {GlobalCounters.mem_used/1e9:5.2f} GB " +
             (str() if et is None else f"tm {et*1e6:9.2f}us/{GlobalCounters.time_sum_s*1e3:9.2f}ms ({op_estimate/((et or 1e-20)*1e9):8.2f} GFLOPS, {self.mem_estimate/((et or 1e-20)*1e9):7.2f} GB/s)"))
-    self.update_stat_after_call(op_estimate=op_estimate)
-    return et
-
-  def update_stat_after_call(self, var_vals=None, op_estimate=None, symbolic_cache=None):
-    if op_estimate is None: op_estimate = sym_infer(self.op_estimate, var_vals, symbolic_cache)
     GlobalCounters.kernel_count += 1
     GlobalCounters.global_ops += op_estimate
     GlobalCounters.global_mem += self.mem_estimate
+    return et
 
 class Compiled:
   def __init__(self, buffer: Type[RawBuffer], linearizer_opts, renderer, runtime, synchronize=lambda: None, batch_exec=None):
