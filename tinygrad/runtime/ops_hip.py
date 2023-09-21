@@ -1,11 +1,13 @@
 import numpy as np
 import ctypes, functools
 import extra.hip_wrapper as hip
-from tinygrad.helpers import DEBUG, getenv
-from tinygrad.ops import Compiled
+from typing import Tuple, Any, List
+from tinygrad.helpers import DEBUG, getenv, NOSTAT, GlobalCounters
+from tinygrad.ops import Compiled, ASTRunner
 from tinygrad.runtime.lib import RawBufferCopyInOut, LRUAllocator, RawBufferTransfer
 from tinygrad.codegen.kernel import LinearizerOptions
 from tinygrad.renderer.cstyle import uops_to_cstyle, CStyleLanguage
+from tinygrad.shape.symbolic import sym_infer
 
 # TODO: if you fork and exit the child process after creating anything with cl on AMD, it hangs on e.wait()
 if DEBUG >= 6:
@@ -27,6 +29,40 @@ class _HIP:
     self.default_device = getenv("HIP_DEFAULT_DEVICE")
     self.allocator = HIPAllocator(hip.hipGetDeviceProperties(self.default_device).totalGlobalMem)
 HIP = _HIP()
+
+class HIPGraph:
+  def __init__(self, jit_cache: List[Tuple[Any, Any, Any]]):
+    self.info: List[Tuple[Any, ...]] = []
+    if not all(isinstance(prg, ASTRunner) and isinstance(prg.clprg, HIPProgram) for prg,_,_ in jit_cache): raise ValueError # Only HIPProgram can be captured.
+    if len(set([pargs[0]._device for _,pargs,_ in jit_cache])) != 1: raise ValueError # Only one device is supported now.
+    capture_stream = hip.hipStreamCreate()
+    hip.hipStreamBeginCapture(capture_stream)
+    for prg, pargs, variables in jit_cache:
+      _, _, graph, deps = hip.hipStreamGetCaptureInfo_v2(capture_stream)
+      global_size, local_size = prg.launch_dims(variables)
+      params = hip.buildKernelNodeParams(*pargs, *variables.values(), func=prg.clprg.prgs[pargs[0]._device], grid=global_size, block=local_size)
+      graph_node = hip.hipGraphAddKernelNode(graph, deps, params)
+      hip.hipStreamUpdateCaptureDependencies(capture_stream, [graph_node], 1)
+      self.info.append((graph_node, params, prg.mem_estimate, sym_infer(prg.op_estimate, variables)))
+    self.graph = hip.hipStreamEndCapture(capture_stream) # Only one graph is supported now
+    self.instance = hip.hipGraphInstantiate(self.graph)
+    hip.hipStreamDestroy(capture_stream)
+  def __del__(self):
+    if hasattr(self, 'instance'): hip.hipGraphExecDestroy(self.instance)
+    if hasattr(self, 'graph'): hip.hipGraphDestroy(self.graph)
+  def __update(self, nodeid, prg, pargs, variables, symbolic_cache=None, updated_args=None):
+    graph_node, params, _, _ = self.info[nodeid]
+    global_size, local_size = prg.launch_dims(variables, symbolic_cache=symbolic_cache)
+    hip.updateKernelNodeParams(params, *pargs, *variables.values(), grid=global_size, block=local_size, updated_args=updated_args)
+    hip.hipGraphExecKernelNodeSetParams(self.instance, graph_node, params)
+    if not NOSTAT: self.info[nodeid] = (graph_node, params, prg.mem_estimate, sym_infer(prg.op_estimate, variables, symbolic_cache=symbolic_cache))
+  def exec(self, jit_cache: List[Tuple[Any, Any, Any]], updatable_entries, symbolic_cache=None):
+    for j,v in updatable_entries.items(): self.__update(j, jit_cache[j][0], jit_cache[j][1], jit_cache[j][2], symbolic_cache=symbolic_cache, updated_args=v)
+    hip.hipGraphLaunch(self.instance)
+    if not NOSTAT:
+      GlobalCounters.kernel_count += len(self.info)
+      GlobalCounters.global_ops += sum(x[3] for x in self.info)
+      GlobalCounters.global_mem += sum(x[2] for x in self.info)
 
 class RawHIPBuffer(RawBufferCopyInOut, RawBufferTransfer):
   def __init__(self, size, dtype, device=str(HIP.default_device)): super().__init__(size, dtype, allocator=HIP.allocator, **{'device': int(device)})
@@ -91,4 +127,4 @@ __device__ void vstore_half4(float4 data, size_t offset, half *p) { *(p + offset
   """,
   gid = [f'blockIdx.{chr(120+i)}' for i in range(3)],
   lid = [f'threadIdx.{chr(120+i)}' for i in range(3)]))
-HIPBuffer = Compiled(RawHIPBuffer, LinearizerOptions(), renderer, HIPProgram, hip.hipDeviceSynchronize)
+HIPBuffer = Compiled(RawHIPBuffer, LinearizerOptions(), renderer, HIPProgram, hip.hipDeviceSynchronize, HIPGraph)

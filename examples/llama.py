@@ -7,7 +7,7 @@ from pathlib import Path
 import functools, sys, argparse, json, os
 import numpy as np
 np.set_printoptions(linewidth=200)
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 
 from tinygrad.helpers import Timing, getenv, DEBUG, dtypes, CI
 from tinygrad.ops import Device
@@ -15,7 +15,7 @@ from tinygrad.tensor import Tensor
 from tinygrad.nn import Embedding, Linear
 from tinygrad.nn.state import safe_load, torch_load, load_state_dict
 from tinygrad.ops import GlobalCounters
-from tinygrad.jit import TinyJit
+from tinygrad.jit import TinyJit, JitCtx
 from tinygrad.shape.symbolic import Variable, sym_infer
 
 JIT = getenv("JIT", 0 if CI else 1)
@@ -69,7 +69,7 @@ class Attention:
     self.wv = linear(dim, self.n_kv_heads * self.head_dim, bias=False)
     self.wo = linear(self.n_heads * self.head_dim, dim, bias=False)
 
-  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, freqs_cis:Tensor, mask:Optional[Tensor], jit_ctx:Optional[Dict[Variable,int]]=None) -> Tuple[Tensor, Tensor, Tensor]:
+  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, freqs_cis:Tensor, mask:Optional[Tensor], jit_ctx:Optional[JitCtx]=None) -> Tuple[Tensor, Tensor, Tensor]:
     bsz, seqlen, _ = x.shape
     xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
     xq = xq.reshape(xq.shape[0], xq.shape[1], self.n_heads, self.head_dim)
@@ -113,7 +113,7 @@ class TransformerBlock:
     self.attention_norm = RMSNorm(dim, norm_eps)
     self.ffn_norm = RMSNorm(dim, norm_eps)
 
-  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, freqs_cis:Tensor, mask:Optional[Tensor], jit_ctx:Optional[Dict[Variable,int]]=None):
+  def __call__(self, x:Tensor, cache_k:Optional[Tensor], cache_v:Optional[Tensor], start_pos:int, freqs_cis:Tensor, mask:Optional[Tensor], jit_ctx:Optional[JitCtx]=None):
     bsz, seqlen, _ = x.shape
     if JIT and mask is None:
       assert cache_k is not None and cache_v is not None, "no cache"
@@ -157,11 +157,12 @@ class Transformer:
     _bsz, seqlen = tokens.shape
     if seqlen == 1 and JIT:
       pos = Variable("pos", 1, 1024)
+      jit_ctx = JitCtx({pos: start_pos})
       freqs_cis = self.freqs_cis.shrink(((0, self.freqs_cis.shape[0]), (pos, pos+seqlen),(0, self.freqs_cis.shape[2]),(0, self.freqs_cis.shape[3]),(0, self.freqs_cis.shape[4])))
       freqs_cis.lazydata.var_vals[pos] = start_pos
       h = self.tok_embeddings_jitted(tokens)
       for i, (layer, (cache_k, cache_v)) in enumerate(zip(self.layers_jitted, self.kv_caches)):
-        h, cache_k, cache_v = layer(h, cache_k, cache_v, start_pos=start_pos, freqs_cis=self.freqs_cis, mask=None, jit_ctx={pos: start_pos})
+        h, cache_k, cache_v = layer(h, cache_k, cache_v, start_pos=start_pos, freqs_cis=self.freqs_cis, mask=None, jit_ctx=jit_ctx)
         # TODO: move the kv cache into Attention, pre-allocate the cache and instead of cat, update the cache in-place
         self.kv_caches[i] = (cache_k, cache_v)
       return self.postprocess_jitted(h, temperature)

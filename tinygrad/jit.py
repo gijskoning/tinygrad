@@ -3,21 +3,26 @@ from weakref import ref
 from collections import defaultdict
 import functools, itertools
 from tinygrad.helpers import DEBUG, DType, merge_dicts
-from tinygrad.ops import Device
+from tinygrad.ops import RawBuffer, Device, Compiled
 from tinygrad.tensor import Tensor
-from tinygrad.ops import RawBuffer
 from tinygrad.shape.shapetracker import ShapeTracker
 from tinygrad.shape.symbolic import Variable
 
 JIT_SUPPORTED_DEVICE = ["GPU", "CLANG", "METAL", "CUDA", "HIP", "WEBGPU", "LLVM"]
 
+class JitCtx:
+  def __init__(self, var_vals: Dict[Variable, int], cache: Optional[Dict[int, int]]=None):
+    self.var_vals, self.cache = var_vals, (dict() if cache is None else cache)
+
 class TinyJit:
   def __init__(self, fxn:Callable):
     self.fxn: Callable = fxn
     self.cnt: int = 0
-    self.jit_cache: List[Tuple[Callable, List[Optional[RawBuffer]], Dict[Variable, int]]] = []
+    self.jit_cache: List[Tuple[Any, List[Optional[RawBuffer]], Dict[Variable, int]]] = []
     self.ret: Any = None
     self.input_replace: Dict[Tuple[int, int], Tuple[Union[int, str], ShapeTracker, DType]]= {}   # (kernel_number, buffer_number) -> (input_name, expected_shapetracker, expected_type)
+    self.batch_executor: Optional[Any] = None
+    self.updatable_entries: Dict[int, List[int]] = defaultdict(list) # (kernel_number) -> list(argument id). These are buffers from input + variables.
 
   # add support for instance methods
   def __get__(self, obj, objtype): return functools.partial(self.__call__, obj)
@@ -29,19 +34,21 @@ class TinyJit:
     assert len(input_rawbuffers) != 0, "no inputs to JIT"
     assert len(set(input_rawbuffers.values())) == len(input_rawbuffers), "duplicate inputs to JIT"
     if self.cnt >= 2:
-      try: var_vals: Dict[Variable, int] = kwargs["jit_ctx"]
-      except KeyError: var_vals = merge_dicts([arg.lazydata.var_vals for arg in args if arg.__class__ is Tensor])
+      if "jit_ctx" in kwargs and kwargs["jit_ctx"] is not None: var_vals, symbolic_cache = cast(JitCtx, kwargs["jit_ctx"]).var_vals, cast(JitCtx, kwargs["jit_ctx"]).cache
+      else: var_vals, symbolic_cache = merge_dicts([arg.lazydata.var_vals for arg in args if arg.__class__ is Tensor]), None
       if len(var_vals) > 1: var_vals = dict(sorted(var_vals.items(), key=lambda kv: kv[0].key))
       for (j,i),(input_name, expected_st, expected_type) in self.input_replace.items():
         assert input_rawbuffers[input_name][0].dtype == expected_type, f"type mismatch in JIT, {input_rawbuffers[input_name][0].dtype} != {expected_type}"
         # NOTE: if we pass jit_ctx instead of using reshape to update the var_vals, we cannot compare the shapetracker directly
         if "jit_ctx" not in kwargs: assert input_rawbuffers[input_name][1].views == expected_st.views, f"ShapeTracker.views mismatch in JIT, {input_rawbuffers[input_name][1].views} != {expected_st.views}"
         self.jit_cache[j][1][i] = input_rawbuffers[input_name][0]
-      for prg, pargs, variables in self.jit_cache: # type: Callable, List[Optional[RawBuffer]], Dict[Variable, int]
-        for k in variables.keys():
-          try: variables[k] = var_vals[k]
+      for j in self.updatable_entries.keys():
+        for k in self.jit_cache[j][2].keys():
+          try: self.jit_cache[j][2][k] = var_vals[k]
           except KeyError: pass
-        prg(pargs, variables, jit=True)
+      if self.batch_executor: self.batch_executor.exec(self.jit_cache, self.updatable_entries, symbolic_cache=symbolic_cache)
+      else:
+        for prg, pargs, variables in self.jit_cache: prg(pargs, variables, jit=True) # type: ignore
       for (j,i) in self.input_replace.keys(): self.jit_cache[j][1][i] = None
     elif self.cnt == 1:
       CacheCollector.start()
@@ -55,8 +62,14 @@ class TinyJit:
         for i,a in enumerate(cache[1]):
           if a in [v[0] for v in input_rawbuffers.values()]:
             self.input_replace[(j_,i)] = [(k, v[1], v[0].dtype) for k,v in input_rawbuffers.items() if v[0] == a][0]
+            self.updatable_entries[j_].append(i)
+        for i in range(len(cache[2])): self.updatable_entries[j_].append(len(cache[1])+i)
         #if prg.local_size is None: prg.local_size = prg.optimize_local_size(args, preserve_output=True)  # the JIT can optimize local
       assert set([x[0] for x in self.input_replace.values()]) == set(input_rawbuffers.keys()), "some input tensors not found"
+
+      # init batch_executor
+      try: self.batch_executor = cast(Compiled, Device[Device.DEFAULT]).batch_exec(self.jit_cache)
+      except (ValueError, TypeError): self.batch_executor = None
       for (j,i) in self.input_replace.keys(): self.jit_cache[j][1][i] = None
     elif self.cnt == 0:
       self.ret = self.fxn(*args, **kwargs)

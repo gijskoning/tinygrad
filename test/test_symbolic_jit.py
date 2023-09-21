@@ -1,5 +1,5 @@
 import unittest
-from tinygrad.jit import TinyJit
+from tinygrad.jit import TinyJit, JitCtx
 from tinygrad.helpers import getenv
 from tinygrad.shape.symbolic import Variable
 from tinygrad.tensor import Tensor, Device
@@ -26,8 +26,9 @@ class TestSymbolicJit(unittest.TestCase):
       return (a+1).realize()
     jf = TinyJit(f)
     for i in range(1, 5):
+      jit_ctx = JitCtx({vi: i})
       a = Tensor.rand(3, i)
-      symbolic = jf(a, jit=True, jit_ctx={vi: i}).reshape(3, i).numpy()
+      symbolic = jf(a, jit=True, jit_ctx=jit_ctx).reshape(3, i).numpy()
       expected = f(a).numpy()
       np.testing.assert_allclose(symbolic, expected, atol=1e-6, rtol=1e-6)
     assert len(jf.jit_cache) == 1
@@ -174,6 +175,18 @@ class TestSymbolicJit(unittest.TestCase):
       symbolic.lazydata.var_vals[vi] = i
       symbolic = jf(symbolic).numpy()
       expected = f(a.shrink(((3,5),(i,i+2)))).numpy()
+      np.testing.assert_allclose(symbolic, expected, atol=1e-6, rtol=1e-6)
+    assert len(jf.jit_cache) == 1
+
+  def test_none_jit_ctx(self):
+    def f(a, b, jit_ctx=None): return (a+b).realize()
+    jf = TinyJit(f)
+    vi = Variable("i", 1, 10)
+    for i in range(1, 5):
+      a = Tensor.rand(3, i)
+      b = Tensor.rand(3, i)
+      symbolic = jf(a.reshape(3, vi), b.reshape(3, vi), jit_ctx=None).reshape(3, i).numpy()
+      expected = f(a, b).numpy()
       np.testing.assert_allclose(symbolic, expected, atol=1e-6, rtol=1e-6)
     assert len(jf.jit_cache) == 1
 
