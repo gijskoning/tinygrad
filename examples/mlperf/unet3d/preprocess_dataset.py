@@ -4,7 +4,7 @@ import hashlib
 import json
 from tqdm import tqdm
 
-import nibabel
+import nibabel # pip3 install nibabel
 import numpy as np
 import torch
 from torch.nn.functional import interpolate
@@ -152,5 +152,3 @@ if __name__ == '__main__':
 
     if args.mode == "verify":
         verify_dataset(args.results_dir)
-
-

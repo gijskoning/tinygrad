@@ -3,7 +3,7 @@ from typing import Optional
 from examples.mlperf.unet3d.data_loader import get_data_loaders
 from examples.mlperf.unet3d.inference import evaluate
 from examples.mlperf.unet3d.training import train
-from models.unet3d import Unet3D
+from models.unet3d import UNet3D
 from .losses import DiceCELoss, DiceScore
 from math import ceil
 
@@ -37,7 +37,7 @@ class Flags:
     
 
 def main(flags):
-    model = Unet3D(1, 3)
+    model = UNet3D(1, 3)
     
     train_dataloader, val_dataloader = get_data_loaders(flags, 1, 0) # todo: multi-gpu
     samples_per_epoch = len(train_dataloader) * flags.batch_size

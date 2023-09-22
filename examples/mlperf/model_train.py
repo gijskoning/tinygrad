@@ -1,7 +1,9 @@
 from tqdm import tqdm
+
+from models.unet3d import UNet3D
 from tinygrad.helpers import getenv, dtypes
 from tinygrad.nn import optim
-from tinygrad.state import get_parameters
+from tinygrad.nn.state import get_parameters
 from tinygrad.tensor import Tensor
 
 def train_resnet():
@@ -17,14 +19,13 @@ def train_unet3d(target=0.908, roi_shape=(64,64,128)):
   from extra.datasets.kits19 import (get_train_files, get_val_files, iterate,
                                      sliding_window_inference)
   from extra.training import lr_warmup
-  from models.unet3d import UNet3D
-  
+
   dtype = "float16"
-  
+
   Tensor.training = True
   in_channels, n_class, BS = 1, 3, 1, # original: 1, 3, 2
   mdl = UNet3D(in_channels, n_class)
-  mdl.load_from_pretrained(dtype=dtype)
+  # mdl.load_from_pretrained(dtype=dtype)
   lr_warmup_epochs = 0 # original: 200
   init_lr, lr = 1e-2, 0.8
   max_epochs = 4 # original: 4000
@@ -71,10 +72,8 @@ def train_maskrcnn():
 if __name__ == "__main__":
   Tensor.training = True
 
-  for m in getenv("MODEL", "resnet,retinanet,unet3d,rnnt,bert,maskrcnn").split(","):
+  for m in getenv("MODEL", "unet3d").split(","):
     nm = f"train_{m}"
     if nm in globals():
       print(f"training {m}")
       globals()[nm]()
-
-
