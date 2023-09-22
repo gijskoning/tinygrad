@@ -148,6 +148,14 @@ class Unet3D:
 
     return x
 
+  def load_from_pretrained(self):
+    fn = Path(__file__).parents[1] / "weights" / "unet-3d.ckpt"
+    download_file("https://zenodo.org/record/5597155/files/3dunet_kits19_pytorch.ptc?download=1", fn)
+    state_dict = torch.jit.load(fn, map_location=torch.device("cpu")).state_dict()
+    for k, v in state_dict.items():
+      obj = get_child(self, k)
+      assert obj.shape == v.shape, (k, obj.shape, v.shape)
+      obj.assign(v.numpy())
 
 def load_from_pretrained(model, dtype="float32"):
   raise NotImplementedError("TODO: load pretrained weights")
@@ -161,7 +169,6 @@ def load_from_pretrained(model, dtype="float32"):
     obj = get_child(model, k)
     assert obj.shape == v.shape, (k, obj.shape, v.shape)
     obj.assign(v.numpy().astype(dtype))
-
 
 if __name__ == "__main__":
   mdl = Unet3D(1, 3)

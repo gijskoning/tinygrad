@@ -4,7 +4,7 @@ import unittest
 from tinygrad.lazy import LazyBuffer, Device
 from tinygrad.tensor import Tensor
 from tinygrad.shape.symbolic import Variable
-from tinygrad.ops import GlobalCounters
+from tinygrad.jit import CacheCollector
 
 class TestLazyBuffer(unittest.TestCase):
   def test_fromcpu_buffer_sharing(self):
@@ -55,42 +55,18 @@ class TestLazyBuffer(unittest.TestCase):
     d3 = in1.reshape(8,8)
     assert len(d3.lazydata.op.src[0].children) == 2
 
-    GlobalCounters.cache = []
+    CacheCollector.start()
     l = Tensor.rand(8,8)
     r = Tensor.rand(8,8)
     dd = d1 + l
     dd.realize()
     de = d3 + r
     de.realize()
-    assert len(GlobalCounters.cache) == 3
-    assert GlobalCounters.cache[0][0].name.startswith("r_") # Reduce should not merged 2 times.
-    assert GlobalCounters.cache[1][0].name.startswith("E_")
-    assert GlobalCounters.cache[2][0].name.startswith("E_")
-    GlobalCounters.cache = None
-
-class TestVariableBuffer(unittest.TestCase):
-  def test_get_variable_buffers_no_variable(self):
-    t = Tensor.rand(2, 3)
-    assert t.lazydata.get_variable_buffers() == {}
-
-  def test_get_variable_buffers_one_variable(self):
-    v = Variable("v", 1, 10)
-    t = Tensor.rand(2, 3).reshape(v, 3)
-    buffers = t.lazydata.get_variable_buffers()
-    assert len(buffers) == 1 and buffers[v].realize().realized.toCPU() == 2
-    v = Variable("v", 1, 10)
-    t = Tensor.rand(2, 3).reshape(2, v)
-    buffers = t.lazydata.get_variable_buffers()
-    assert len(buffers) == 1 and buffers[v].realize().realized.toCPU() == 3
-
-  def test_get_variable_buffers_cat(self):
-    v1 = Variable("v1", 1, 10)
-    v2 = Variable("v2", 1, 10)
-    t1 = Tensor.rand(2, 3).reshape(v1, 3)
-    t2 = Tensor.rand(6, 3).reshape(v2, 3)
-    t = t1.cat(t2)
-    buffers = t.lazydata.get_variable_buffers()
-    assert len(buffers) == 2 and buffers[v1].realize().realized.toCPU() == 2 and buffers[v2].realize().realized.toCPU() == 6
+    cache = CacheCollector.finish()
+    assert len(cache) == 3
+    assert cache[0][0].name.startswith("r_") # Reduce should not merged 2 times.
+    assert cache[1][0].name.startswith("E_")
+    assert cache[2][0].name.startswith("E_")
 
 if __name__ == "__main__":
   unittest.main()

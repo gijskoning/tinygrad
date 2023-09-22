@@ -1,5 +1,7 @@
 import unittest
-from tinygrad.helpers import Context, ContextVar
+import numpy as np
+from tinygrad.helpers import Context, ContextVar, DType, dtypes, merge_dicts, strip_parens, prod
+from tinygrad.shape.symbolic import Variable, NumNode
 
 VARIABLE = ContextVar("VARIABLE", 0)
 
@@ -105,6 +107,36 @@ with Context(VARIABLE=1):
     with Context(D=3):
       ...
     assert D.value == 2, f"Expected D to be 2, but was {D.value}. Indicates that Context.__exit__ did not restore to the correct value."
+
+class TestMergeDicts(unittest.TestCase):
+  def test_merge_dicts(self):
+    a = {"a": 1, "b": 2}
+    b = {"a": 1, "c": 3}
+    c = {}
+    d = {"a": 2, "b": 2}
+    assert merge_dicts([a, b]) == {"a": 1, "b": 2, "c": 3}
+    assert merge_dicts([a, c]) == a
+    assert merge_dicts([a, b, c]) == {"a": 1, "b": 2, "c": 3}
+    with self.assertRaises(AssertionError):
+      merge_dicts([a, d])
+
+class TestDtypes(unittest.TestCase):
+  def test_dtypes_fields(self):
+    fields = dtypes.fields()
+    self.assertTrue(all(isinstance(value, DType) for value in fields.values()))
+    self.assertTrue(all(issubclass(value.np, np.generic) for value in fields.values() if value.np is not None))
+
+class TestStripParens(unittest.TestCase):
+  def test_simple(self): self.assertEqual("1+2", strip_parens("(1+2)"))
+  def test_nested(self): self.assertEqual("1+(2+3)", strip_parens("(1+(2+3))"))
+  def test_casted_no_strip(self): self.assertEqual("(int)(1+2)", strip_parens("(int)(1+2)"))
+
+class TestProd(unittest.TestCase):
+  def test_empty(self): self.assertEqual(1, prod(tuple()))
+  def test_ints(self): self.assertEqual(30, prod((2, 3, 5)))
+  def test_variable(self): self.assertEqual("(a*12)", prod((Variable("a", 1, 5), 3, 4)).render())
+  def test_variable_order(self): self.assertEqual("(a*12)", prod((3, 4, Variable("a", 1, 5))).render())
+  def test_num_nodes(self): self.assertEqual(NumNode(6), prod((NumNode(2), NumNode(3))))
 
 if __name__ == '__main__':
   unittest.main()
