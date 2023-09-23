@@ -1,5 +1,7 @@
 from typing import Dict, Optional
 
+import numpy as np
+import torch.random
 from tqdm import tqdm
 from examples.mlperf.unet3d.inference import evaluate
 from tinygrad.helpers import dtypes, getenv
@@ -92,12 +94,16 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       #     break
    
 if __name__ == "__main__":
+  seed = 0
+  if seed is not None:
+    Tensor._seed = seed
+    np.random.seed(seed)
+    torch.random.manual_seed(seed)
   from examples.mlperf.unet3d.data_loader import get_data_loaders
   from examples.mlperf.unet3d.losses import DiceCELoss, DiceScore
   from examples.mlperf.unet3d import Flags
   from models.unet3d import UNet3D
   import os
-  
   flags = Flags(batch_size=1, verbose=True, data_dir='/tmp/kits19/data')#os.environ["KITS19_DATA_DIR"])
   model = UNet3D(1, 3)
   if getenv("FP16"):
