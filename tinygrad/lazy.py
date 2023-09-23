@@ -5,10 +5,10 @@ from weakref import ref, WeakSet, WeakValueDictionary
 
 import numpy as np
 from tinygrad.graph import log_op
-from tinygrad.helpers import GRAPH, DEBUG, prod, getenv, DType, dtypes, flatten, ImageDType, partition
+from tinygrad.helpers import GRAPH, DEBUG, prod, getenv, DType, dtypes, flatten, ImageDType, partition, all_int
 from tinygrad.ops import Device, Compiled, UnaryOps, BinaryOps, TernaryOps, ReduceOps, MovementOps, LoadOps, OpType, LazyOp
 from tinygrad.shape.shapetracker import ShapeTracker, View, get_contraction
-from tinygrad.shape.symbolic import Variable, sint, all_int
+from tinygrad.shape.symbolic import Variable, sint
 
 from tinygrad.runtime.lib import RawConst, RawBuffer, RawBufferMapped, RawBufferTransfer
 from tinygrad.runtime.ops_cpu import RawNumpyBuffer
@@ -148,6 +148,8 @@ class LazyBuffer:
         self.op = _ast_reduceops(self)
         if self.op.op in BinaryOps: self.op = _ast_binaryops(self)
       elif self.optype is LoadOps: LOAD_OPS_DISPATCHER[cast(LoadOps, self.op.op)](self)
+      # TODO: prerealize MovementOps to share the underlying buffer
+      elif self.optype is MovementOps: self.realized = self.op.src[0].realize().realized
       # run the ast if we still have to, and log the op
       if not self.realized:
         for x in self.op.buffers: x.realize()
@@ -190,7 +192,7 @@ class LazyBuffer:
 
   @staticmethod
   def fromCPU(x: np.ndarray) -> LazyBuffer:
-    return LazyBuffer("CPU", ShapeTracker(x.shape, [View.create(x.shape, tuple(st//x.itemsize for st in x.strides))]), LoadOps, LazyOp(LoadOps.EMPTY, (), None), dtypes.from_np(x.dtype), {}, RawNumpyBuffer.fromCPU(x))
+    return LazyBuffer("CPU", ShapeTracker(x.shape, [View.create(x.shape)]), LoadOps, LazyOp(LoadOps.EMPTY, (), None), dtypes.from_np(x.dtype), {}, RawNumpyBuffer.fromCPU(x))
 
   def toCPU(self) -> np.ndarray:
     assert self.dtype.np, f"{self.dtype} is not supported in toCPU"
@@ -241,7 +243,7 @@ class LazyBuffer:
     srcs = _push_movement_ops((self,)) if SHUFFLE_MOVEMENT_OPS else (self,)
     return create_lazybuffer(self.device, ShapeTracker(new_shape), ReduceOps, LazyOp(op, srcs, new_shape), self.dtype, self.var_vals)
 
-  def reduce_op(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[sint, ...]) -> LazyBuffer:
+  def r(self:LazyBuffer, op:ReduceOps, new_shape:Tuple[sint, ...]) -> LazyBuffer:
     if any(not isinstance(s, int) for s in self.shape) or prod(self.shape) // prod(new_shape) < 32768: return self._reduce_op(op, new_shape) # The amount of work should be big enough to take the benefit of "2 kernels" approach.
     heuristic, divisor, dim_to_split = max(((divisor := math.gcd(256, old))/(stride or math.inf), divisor, i) for i, (old, new, stride) in enumerate(zip(self.shape, new_shape, self.st.real_strides())) if old != new) # type: ignore
     if divisor < 16 or heuristic < 0.1: return self._reduce_op(op, new_shape) # Choose largest divisor (>=16) to split on, penalize large strides.
@@ -287,7 +289,7 @@ class LazyBuffer:
         src, rop = self.op.src[0], self.op.op
         src.children.discard(self)
         del self  # TODO: why doesn't this delete remove it from the children
-        return src.permute(arg).reduce_op(cast(ReduceOps, rop), narg)
+        return src.permute(arg).r(cast(ReduceOps, rop), narg)
 
       # move permutes before expands (always, this is safe)
       if self.op.op == MovementOps.EXPAND:
