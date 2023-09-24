@@ -23,7 +23,7 @@ def lr_warmup(optimizer, init_lr, lr, current_epoch, warmup_epochs):
 def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
   optimizer = optim.SGD(get_parameters(model), lr=flags.learning_rate, momentum=flags.momentum, weight_decay=flags.weight_decay)
   # scaler = GradScaler() # TODO: add grad scaler
-  
+
   next_eval_at = flags.start_eval_at
 
   if flags.lr_decay_epochs:
@@ -47,7 +47,6 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       # lr_warmup(optimizer, flags.init_learning_rate, flags.learning_rate, epoch, flags.lr_warmup_epochs)
       # a = Tensor.rand(*label.shape, dtype=dtypes.int32).realize()
       loss_value = None
-      optimizer.zero_grad()
       print("HI")
       for iteration, batch in enumerate(tqdm(train_loader, disable=not flags.verbose)):
         print('i', iteration)
@@ -59,8 +58,8 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
         print(iteration)
         print('optimizerb2', optimizer.b[0].numpy()[0,0,0,:10])
 
-        if epoch == 7:
-          exit()
+        # if epoch == 7:
+        #   exit()
         print('grad', grad.numpy())
         # loss_value = reduce_tensor(loss_value, world_size).detach().cpu().numpy() # TODO: reduce tensor for distributed training
         cumulative_loss.append(loss_value)
@@ -99,8 +98,9 @@ if __name__ == "__main__":
   from models.unet3d import UNet3D
   import os
   # ~ doesnt work here
-  flags = Flags(batch_size=1, verbose=True, data_dir='/home/gijs/code_projects/kits19/data')#os.environ["KITS19_DATA_DIR"])
-  model = UNet3D(1, 3)
+  # batch_size 2 is default: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/runtime/arguments.py
+  flags = Flags(batch_size=2, verbose=True, data_dir='/home/gijs/code_projects/kits19/data')#os.environ["KITS19_DATA_DIR"])
+  model = UNet3D(1, 3, debug_speed=getenv("SPEED", 1))
   if getenv("FP16"):
     weights = get_state_dict(model)
     for k, v in weights.items():
@@ -113,3 +113,4 @@ if __name__ == "__main__":
   score_fn = DiceScore()
   train(flags, model, train_loader, val_loader, loss_fn, score_fn)
 # FP16=1 JIT=1 python training.py
+# reference: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63

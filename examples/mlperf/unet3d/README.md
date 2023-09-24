@@ -15,7 +15,10 @@
     
     The data preprocessing script is called `preprocess_dataset.py`. All the required hyperparameters are already set. All you need to do is to invoke the script with correct paths:
     ```bash
-   # todo fix this readme
+   # todo fix this readme.
+    
+   # python3 -m kits19/starter_code.get_imaging
+   # minimum of 2 images is required
     python3 preprocess_dataset.py --data_dir kits19/data --results_dir ~/code_projects/kits19/data
     ```
    
