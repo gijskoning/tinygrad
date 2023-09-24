@@ -115,8 +115,7 @@ class DiceCELoss:
                      include_background=include_background)
 
   def __call__(self, y_pred, y_true):
-    # ce = cross_entropy(y_pred, y_true.squeeze(dim=1)).cast(dtypes.int64) # However this is reference todo should be long: int64??
-    ce = cross_entropy(y_pred, to_one_hot_tensor(y_true)) # might need to for half types. Since y_pred is half here
+    ce = cross_entropy(y_pred, to_one_hot_tensor(y_true))
 
     dice = (1.0 - self.dice(y_pred, y_true)).mean()
     return (dice + ce) / 2
