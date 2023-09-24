@@ -6,6 +6,7 @@ import torch
 # import torch.random
 from tqdm import tqdm
 from examples.mlperf.unet3d.inference import evaluate
+from extra.training import lr_warmup
 from tinygrad.helpers import dtypes, getenv
 from tinygrad.jit import TinyJit
 from models.unet3d import UNet3D
@@ -13,11 +14,6 @@ from models.unet3d import UNet3D
 from tinygrad.nn import optim
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict
 from tinygrad.tensor import Tensor
-
-def lr_warmup(optimizer, init_lr, lr, current_epoch, warmup_epochs):
-  scale = current_epoch / warmup_epochs
-  new_lr = init_lr + (lr - init_lr) * scale
-  optimizer.lr.assign([new_lr])
 
 def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
   optimizer = optim.SGD(get_parameters(model), lr=flags.learning_rate, momentum=flags.momentum, weight_decay=flags.weight_decay)

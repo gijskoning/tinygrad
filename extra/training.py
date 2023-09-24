@@ -3,9 +3,10 @@ from tqdm import trange
 from tinygrad.helpers import dtypes, getenv
 from tinygrad.tensor import Tensor
 
-def lr_warmup(optim, init_lr, lr, current_epoch, warmup_epochs):
+def lr_warmup(optimizer, init_lr, lr, current_epoch, warmup_epochs):
   scale = current_epoch / warmup_epochs
-  optim.lr = init_lr + (lr - init_lr) * scale
+  new_lr = init_lr + (lr - init_lr) * scale
+  optimizer.lr.assign([new_lr])
 
 def train(model, X_train, Y_train, optim, steps, BS=128, lossfn=lambda out,y: out.sparse_categorical_crossentropy(y),
         transform=lambda x: x, target_transform=lambda x: x, noloss=False):
