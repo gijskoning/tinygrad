@@ -117,7 +117,7 @@ class UNet3D:
     # filters = [32, 64, 128, 256, 320]
     # filters = [max(1,i//16) for i in [32, 64, 128, 256, 320]] # todo fix. This makes it fit on my pc
     filters = [min(4, i) for i in [32, 64, 128, 256, 320]] # todo fix. This makes it fit on my pc
-    filters[0] =1 # this cannot be too big. 2 doesnt fit
+    filters[0] = 1  # this cannot be too big. 2 doesnt fit
     if debug_speed:
       filters = [1, 1] # todo
     self.filters = filters
@@ -145,7 +145,6 @@ class UNet3D:
     self.output = OutputLayer(input_dim, n_class)
 
   def __call__(self, x):
-
     x = self.input_block(x)
     outputs = [x]
 
@@ -154,14 +153,11 @@ class UNet3D:
       outputs.append(x)
 
     x = self.bottleneck(x)
-
+    assert len(self.upsample) == len(outputs)
     for upsample, skip in zip(self.upsample, reversed(outputs)):
       x = upsample(x, skip)
 
-    x = self.output(x)
-    params = get_parameters(self)
-    for p in params: p.realize()
-    return x.realize()
+    return self.output(x).realize()
 
   # def load_from_pretrained(self):
   #   fn = Path(__file__).parents[1] / "weights" / "unet-3d.ckpt"
@@ -186,19 +182,19 @@ class UNet3D:
       # obj.assign(v.numpy().astype(dtype))
       obj.assign(v.numpy())
 
-class DiceCELoss:
-  def __init__(self, to_onehot_y=True, use_softmax=True, layout="NCDHW", include_background=False):
-    self.dice = Dice(to_onehot_y=to_onehot_y, use_softmax=use_softmax, layout=layout,
+if __name__ == "__main__":
+  class DiceCELoss:  # todo only used locally
+    def __init__(self, to_onehot_y=True, use_softmax=True, layout="NCDHW", include_background=False):
+      self.dice = Dice(to_onehot_y=to_onehot_y, use_softmax=use_softmax, layout=layout,
                      include_background=include_background)
 
-  def __call__(self, y_pred, y_true):
-    # ce = cross_entropy(y_pred, y_true.squeeze(dim=1)).cast(dtypes.int64) # However this is reference todo should be long: int64??
-    ce = cross_entropy(y_pred, to_one_hot_tensor(y_true)) # this works for the est
+    def __call__(self, y_pred, y_true):
+      # ce = cross_entropy(y_pred, y_true.squeeze(dim=1)).cast(dtypes.int64) # However this is reference todo should be long: int64??
+      ce = cross_entropy(y_pred, to_one_hot_tensor(y_true))  # this works for the est
 
-    dice = (1.0 - self.dice(y_pred, y_true)).mean()
-    return (dice + ce) / 2
+      dice = (1.0 - self.dice(y_pred, y_true)).mean()
+      return (dice + ce) / 2
 
-if __name__ == "__main__":
   Tensor.training = True
   n_class = 3
   model = UNet3D(1, n_class)
