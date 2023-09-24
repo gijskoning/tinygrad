@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import Any
 import torch
+
+from examples.mlperf.unet3d.losses import Dice, cross_entropy, to_one_hot_tensor
 from tinygrad import nn
-from tinygrad.helpers import getenv
+from tinygrad.helpers import dtypes, getenv
 from tinygrad.jit import TinyJit
 from tinygrad.nn import optim
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict
@@ -182,10 +183,22 @@ class UNet3D:
       # obj.assign(v.numpy().astype(dtype))
       obj.assign(v.numpy())
 
+class DiceCELoss:
+  def __init__(self, to_onehot_y=True, use_softmax=True, layout="NCDHW", include_background=False):
+    self.dice = Dice(to_onehot_y=to_onehot_y, use_softmax=use_softmax, layout=layout,
+                     include_background=include_background)
+
+  def __call__(self, y_pred, y_true):
+    # ce = cross_entropy(y_pred, y_true.squeeze(dim=1)).cast(dtypes.int64) # However this is reference todo should be long: int64??
+    ce = cross_entropy(y_pred, to_one_hot_tensor(y_true)) # this works for the est
+
+    dice = (1.0 - self.dice(y_pred, y_true)).mean()
+    return (dice + ce) / 2
+
 if __name__ == "__main__":
   Tensor.training = True
-
-  model = UNet3D(1, 3)
+  n_class = 3
+  model = UNet3D(1, n_class)
   if getenv("FP16"):
     print("FP16 yes")
     weights = get_state_dict(model)
@@ -198,28 +211,31 @@ if __name__ == "__main__":
   Tensor.training = True
   optimizer.zero_grad()
 
-  loss_fn = lambda x,y: (x-y).mean()
-  def step(optimizer:optim.SGD, x):
+  # loss_fn = lambda x,y: (x-y).mean()
+  loss_fn = DiceCELoss()
+
+  def step(optimizer:optim.SGD, x, label):
     output = model(x)
-    label = Tensor.rand(*output.shape) # temp
+    # label = Tensor.rand(*output.shape) # temp
 
     loss_value = loss_fn(output, label)
-
     loss_value.backward()
 
     optimizer.step()
-    return optimizer, loss_value
+    return optimizer, loss_value, label.realize()
     # y, params = model(x)
     # y2 = Tensor.rand(*y.shape)
 
     # loss_value.backward()
     # optimizer.step()
   if getenv("JIT"):
+    print('JIITTTING')
     step = TinyJit(step)
   for _ in range(8):
     x = Tensor.rand(1, 1, 128, 128, 128)
+    label = Tensor.rand(*x.shape,dtype=dtypes.int32) # temp
 
-    optimizer, loss_value = step(optimizer, x)
+    optimizer, loss_value, _ = step(optimizer, x, label)
     print('loss_value', loss_value.numpy())
     optimizer.zero_grad()
 

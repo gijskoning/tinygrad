@@ -1,8 +1,8 @@
 
 import torch.functional as F
 import torch
-import torch.nn as nn
 import numpy as np
+
 from tinygrad.helpers import dtypes
 
 from tinygrad.tensor import Tensor
@@ -46,10 +46,13 @@ class Dice:
             # prediction = torch.argmax(prediction, dim=channel_axis)
 
         if self.to_onehot_y:
-            target = to_one_hot(target, channel_axis)
+          # todo check this method with the reference model:
+          #   # https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
+          target = to_one_hot_tensor(target, channel_axis, self.layout)
 
         if self.to_onehot_x:
-            prediction = to_one_hot(prediction, channel_axis)
+          raise Exception("fix this")
+          prediction = one_hot_tensor(prediction, channel_axis) # todo fix
 
         if not self.include_background:
             assert num_pred_ch > 1, \
@@ -73,24 +76,50 @@ class Dice:
 
 def to_one_hot(array: Tensor, channel_axis=1):
     if len(array.shape) >= 5:
-        array = array.squeeze(dim=channel_axis)
+      print('squeeze')
+      array = array.squeeze(dim=channel_axis)
     _array = np.eye(3, dtype="int")[array.numpy()]
-    array = _array.transpose(0, 4, 1, 2, 3).copy()
+    array = _array.transpose(0, 4, 1, 2, 3)
     return Tensor(array)
+
+# >>> F.one_hot(torch.arange(0, 5) % 3)
+# tensor([[1, 0, 0],
+#         [0, 1, 0],
+#         [0, 0, 1],
+#         [1, 0, 0],
+#         [0, 1, 0]])
+# >>> F.one_hot(torch.arange(0, 5) % 3, num_classes=5)
+# tensor([[1, 0, 0, 0, 0],
+#         [0, 1, 0, 0, 0],
+#         [0, 0, 1, 0, 0],
+#         [1, 0, 0, 0, 0],
+#         [0, 1, 0, 0, 0]])
+
+def to_one_hot_tensor(array: Tensor, channel_axis=1, layout="NCDHW"):
+  # https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
+  if len(array.shape) >= 5:
+    array = array.squeeze(dim=channel_axis)
+  num_classes = 3
+  array = Tensor.eye(num_classes, dtype=dtypes.int32)[array] # this is the F.one_hot function
+  if layout == "NCDHW":
+    array = array.permute(0, 4, 1, 2, 3).float()
+  return array
 
 def cross_entropy(y_pred, y_true_onehot):
     y_pred = y_pred.softmax(axis=1)
     return -((y_true_onehot * y_pred.log()).sum(axis=1)).mean()
 
 class DiceCELoss:
-    def __init__(self, to_onehot_y=True, use_softmax=True, layout="NCDHW", include_background=False):
-        self.dice = Dice(to_onehot_y=to_onehot_y, use_softmax=use_softmax, layout=layout,
-                         include_background=include_background)
+  def __init__(self, to_onehot_y=True, use_softmax=True, layout="NCDHW", include_background=False):
+    self.dice = Dice(to_onehot_y=to_onehot_y, use_softmax=use_softmax, layout=layout,
+                     include_background=include_background)
 
-    def __call__(self, y_pred, y_true):
-        ce = cross_entropy(y_pred, to_one_hot(y_true))
-        dice = (1.0 - self.dice(y_pred, y_true)).mean()
-        return (dice + ce) / 2
+  def __call__(self, y_pred, y_true):
+    # ce = cross_entropy(y_pred, y_true.squeeze(dim=1)).cast(dtypes.int64) # However this is reference todo should be long: int64??
+    ce = cross_entropy(y_pred, to_one_hot_tensor(y_true)) # this works for the est
+
+    dice = (1.0 - self.dice(y_pred, y_true)).mean()
+    return (dice + ce) / 2
 
 
 class DiceScore:
@@ -111,9 +140,9 @@ def test_to_one_hot():
     assert labels.dtype == dtypes.int32
     assert labels.numpy()[0, 0, 1, 0, 0] == 1
     
-    one_hot = to_one_hot(labels, channel_axis=1)
+    one_hot = to_one_hot_tensor(labels, channel_axis=1)
     assert one_hot.shape == (2, 3, 2, 2, 2)
-    assert one_hot.dtype == dtypes.int64
+    assert one_hot.dtype == dtypes.float
     assert one_hot.numpy()[0, :, 1, 0, 0].tolist() == [0, 1, 0]
     
 def test_cross_entropy():

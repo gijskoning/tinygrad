@@ -17,8 +17,8 @@ class Flags:
     seed: int = 42
     shuffling_seed: int = 42
     batch_size: int = 2
-    benchmark: bool =False
-    num_workers: int = 1
+    benchmark: bool = False
+    num_workers: int = 0
     max_epochs: int = 4000
     quality_threshold: float = 0.908
     start_eval_at: int = 1000

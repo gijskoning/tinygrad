@@ -25,36 +25,22 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
   # scaler = GradScaler() # TODO: add grad scaler
   
   next_eval_at = flags.start_eval_at
-  # if getenv("JIT"):
-  #   model = TinyJit(model.__call__)
+
   if flags.lr_decay_epochs:
     raise NotImplementedError("TODO: lr decay")
 
-  # def step(hi, x, *op_params):
-  #   optimizer.b = list(op_params)
-  #   optimizer.zero_grad()
-  #   output, _ = model(x)
-  #   # label = Tensor.rand(*x.shape, dtype=dtypes.int32) # temp
-  #   # print(label.shape)
-  #   # loss_value = loss_fn(output, label)
-  #   loss_value = (output - output).mean()
-  #
-  #   loss_value.backward()
-  #
-  #   optimizer.step()
-  #   return optimizer, loss_value.realize()#, label.realize()
-  def step(x, label, *op_params):
-    optimizer.b = list(op_params)
-    optimizer.zero_grad()
+  def step(x, label): # todo giving a list to jit works. Could refactor jit to also handle dictionaries (for gpt2)
+    print("No jit (yet)")
     output = model(x)
     loss_value = loss_fn(output, label)
+    optimizer.zero_grad()
     loss_value.backward()
     optimizer.step()
-    return output.realize(), optimizer.b, loss_value.realize(), (label+1).realize() # somehow have to do this realize???
-  if getenv("JIT"):
-    step = TinyJit(step)
+    return output, loss_value.realize() # loss_value.realize is needed
+  step_fn = TinyJit(step) if getenv("JIT") else step
 
   Tensor.training = True
+
   for epoch in range(1, flags.max_epochs + 1):
     cumulative_loss = []
     if epoch <= flags.lr_warmup_epochs and flags.lr_warmup_epochs > 0:
@@ -62,12 +48,20 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       # a = Tensor.rand(*label.shape, dtype=dtypes.int32).realize()
       loss_value = None
       optimizer.zero_grad()
+      print("HI")
       for iteration, batch in enumerate(tqdm(train_loader, disable=not flags.verbose)):
         print('i', iteration)
         image, label = batch
         image = Tensor(image.numpy(), requires_grad=False)
         label = Tensor(label.numpy(), requires_grad=False)
-        output, optimizer.b,loss_value, _ = step(image, label, *optimizer.b)
+        output, loss_value = step_fn(image, label)
+        grad = loss_value.grad
+        print(iteration)
+        print('optimizerb2', optimizer.b[0].numpy()[0,0,0,:10])
+
+        if epoch == 7:
+          exit()
+        print('grad', grad.numpy())
         # loss_value = reduce_tensor(loss_value, world_size).detach().cpu().numpy() # TODO: reduce tensor for distributed training
         cumulative_loss.append(loss_value)
         print('loss_value', loss_value.numpy())
@@ -104,7 +98,8 @@ if __name__ == "__main__":
   from examples.mlperf.unet3d import Flags
   from models.unet3d import UNet3D
   import os
-  flags = Flags(batch_size=1, verbose=True, data_dir='/tmp/kits19/data')#os.environ["KITS19_DATA_DIR"])
+  # ~ doesnt work here
+  flags = Flags(batch_size=1, verbose=True, data_dir='/home/gijs/code_projects/kits19/data')#os.environ["KITS19_DATA_DIR"])
   model = UNet3D(1, 3)
   if getenv("FP16"):
     weights = get_state_dict(model)
@@ -117,3 +112,4 @@ if __name__ == "__main__":
   loss_fn = DiceCELoss()
   score_fn = DiceScore()
   train(flags, model, train_loader, val_loader, loss_fn, score_fn)
+# FP16=1 JIT=1 python training.py
