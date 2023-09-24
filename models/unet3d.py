@@ -19,7 +19,6 @@ class ConvBlock:
     kernel_size=3,
     stride=1,
     padding=1,
-    conv_type="regular",
   ) -> None:
     self.conv = nn.Conv3d(
       in_channels,
@@ -30,30 +29,11 @@ class ConvBlock:
       bias=False,
     )
     self.norm = nn.InstanceNorm(out_channels, affine=True)
-    self.weight = self.conv.weight # might need cleaning
 
   def __call__(self, x: Tensor) -> Tensor:
     x = self.conv(x)
     x = self.norm(x)
     return x.relu()
-
-
-class ConvTransposeBlock:
-  def __init__(
-    self, in_channels, out_channels, kernel_size=3, stride=1, padding=1
-  ) -> None:
-    self.conv = nn.ConvTranspose3d(
-      in_channels,
-      out_channels,
-      kernel_size=kernel_size,
-      stride=stride,
-      padding=padding,
-      bias=False,
-    )
-
-  def __call__(self, x: Tensor) -> Tensor:
-    return self.conv(x)
-
 
 class DownsampleBlock:
   def __init__(self, in_channels, out_channels):
@@ -71,9 +51,7 @@ class UpsampleBlock:
   def __init__(self, in_channels, out_channels):
     self.in_channels = in_channels
     self.out_channels = out_channels
-    self.upsample_conv = ConvTransposeBlock(
-      in_channels, out_channels, kernel_size=2, stride=2, padding=0
-    )
+    self.upsample_conv = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2, padding=0, bias=True) # bias is true when norm_type == "None" (see reference mlperf)
     self.conv1 = ConvBlock(2 * out_channels, out_channels)
     self.conv2 = ConvBlock(
       out_channels,
@@ -132,8 +110,8 @@ class UNet3D:
       DownsampleBlock(i, o) for idx, (i, o) in enumerate(zip(self.inp, self.out))
     ]
     self.bottleneck = DownsampleBlock(filters[-1], filters[-1])
-    upsample = [UpsampleBlock(filters[-1], filters[-1])]
-    upsample.extend(
+    self.upsample = [UpsampleBlock(filters[-1], filters[-1])]
+    self.upsample.extend(
       [
         UpsampleBlock(i, o)
         for idx, (i, o) in enumerate(
@@ -141,7 +119,6 @@ class UNet3D:
         )
       ]
     )
-    self.upsample = upsample
     self.output = OutputLayer(input_dim, n_class)
 
   def __call__(self, x):
