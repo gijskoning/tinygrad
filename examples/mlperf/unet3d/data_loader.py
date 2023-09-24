@@ -1,17 +1,12 @@
-import os
 import glob
+import os
+import random
 from pathlib import Path
 
 import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.distributed import DistributedSampler
-
-
-import random
-import numpy as np
 import scipy.ndimage
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 
 
@@ -246,9 +241,3 @@ class PytVal(Dataset):
 
     def __getitem__(self, idx):
         return np.load(self.images[idx]), np.load(self.labels[idx])
-
-
-
-
-
-
