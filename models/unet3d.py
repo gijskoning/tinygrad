@@ -46,7 +46,6 @@ class DownsampleBlock:
     x = self.conv2(x)
     return x
 
-
 class UpsampleBlock:
   def __init__(self, in_channels, out_channels):
     self.in_channels = in_channels
@@ -65,7 +64,6 @@ class UpsampleBlock:
     x = self.conv2(x)
     return x
 
-
 class InputBlock:
   def __init__(self, in_channels, out_channels):
     # self.conv1 = [ConvBlock(in_channels, out_channels), ...] # is actually the layout for the weights from pretrained
@@ -78,7 +76,6 @@ class InputBlock:
     x = self.conv2(x)
     return x
 
-
 class OutputLayer:
   def __init__(self, in_channels, n_class):
     super(OutputLayer, self).__init__()
@@ -88,7 +85,6 @@ class OutputLayer:
 
   def __call__(self, x):
     return self.conv(x)
-
 
 class UNet3D:
   def __init__(self, in_channels, n_class, debug_speed=False):

@@ -21,7 +21,7 @@ def lr_warmup(optimizer, init_lr, lr, current_epoch, warmup_epochs):
 
 def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
   optimizer = optim.SGD(get_parameters(model), lr=flags.learning_rate, momentum=flags.momentum, weight_decay=flags.weight_decay)
-  # scaler = GradScaler() # TODO: add grad scaler
+  # scaler = GradScaler() # scalar is only needed when doing mixed precision. The regular args have this disabled.
   # todo
   # if flags.lr_decay_epochs:
   #   scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
@@ -64,14 +64,13 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       #   print('optimizerb2', optimizer.b[0].numpy()[0, 0, 0, :10])
       #   exit()
       print('grad', grad.numpy())
-      # loss_value = reduce_tensor(loss_value, world_size).detach().cpu().numpy() # TODO: reduce tensor for distributed training
       cumulative_loss.append(loss_value)
       print('loss_value', loss_value.numpy())
       if flags.lr_decay_epochs:
         pass
-        # scheduler.step()
+        # scheduler.step() # todo
       #
-      #   if epoch == next_eval_at:
+      #   if epoch == next_eval_at: # todo
       #     next_eval_at += flags.evaluate_every
       #     # del output
       #
