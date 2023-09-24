@@ -6,16 +6,13 @@ import torch
 # import torch.random
 from tqdm import tqdm
 from examples.mlperf.unet3d.inference import evaluate
-from tinygrad.helpers import getenv
+from tinygrad.helpers import dtypes, getenv
 from tinygrad.jit import TinyJit
 from models.unet3d import UNet3D
 
 from tinygrad.nn import optim
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict
 from tinygrad.tensor import Tensor
-
-
-
 
 def lr_warmup(optimizer, init_lr, lr, current_epoch, warmup_epochs):
   scale = current_epoch / warmup_epochs
@@ -56,14 +53,16 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     for iteration, batch in enumerate(tqdm(train_loader, disable=not flags.verbose)):
       print('iteration', iteration)
       image, label = batch
-      image, label = Tensor(image.numpy()), Tensor(label.numpy())
+      dtype_img = dtypes.half # saves like 500MB!
+      # dtype_img = dtypes.float
+      image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(),dtype=dtype_img)
       output, loss_value = step_fn(image, label, optimizer.lr)
       grad = loss_value.grad
 
-      if epoch == 5:
-        print('model weight', model.input_block.conv1.weight.numpy()[:10])
-        print('optimizerb2', optimizer.b[0].numpy()[0, 0, 0, :10])
-        exit()
+      # if epoch == 5:
+      #   print('model weight', model.input_block.conv1.weight.numpy()[:10])
+      #   print('optimizerb2', optimizer.b[0].numpy()[0, 0, 0, :10])
+      #   exit()
       print('grad', grad.numpy())
       # loss_value = reduce_tensor(loss_value, world_size).detach().cpu().numpy() # TODO: reduce tensor for distributed training
       cumulative_loss.append(loss_value)
@@ -101,8 +100,8 @@ if __name__ == "__main__":
   # batch_size 2 is default: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/runtime/arguments.py
   # this is the real starting script: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/run_and_time.sh
   flags = Flags(batch_size=2, verbose=True, data_dir='/home/gijs/code_projects/kits19/data')#os.environ["KITS19_DATA_DIR"])
-
-  seed = flags.seed
+  flags.num_workers = 0 # for debugging
+  seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
   if seed is not None:
     Tensor._seed = seed
     np.random.seed(seed)
@@ -122,3 +121,5 @@ if __name__ == "__main__":
   train(flags, model, train_loader, val_loader, loss_fn, score_fn)
 # FP16=1 JIT=1 python training.py
 # reference: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
+
+# todo eventually cleanup duplicate stuff. There is also things in extra/kits19
