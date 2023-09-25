@@ -124,7 +124,7 @@ class DiceScore:
                          use_argmax=use_argmax, layout=layout, include_background=include_background)
 
     def __call__(self, y_pred, y_true):
-        return self.dice(y_pred, y_true).mean(axis=0)
+        return self.dice(y_pred, y_true).mean(axis=0).realize()
 
 # tests
 

@@ -60,7 +60,7 @@ from tinygrad.tensor import Tensor
 #
 #     return eval_metrics
 
-def evaluate(flags, model, loader, loss_fn:DiceCELoss, score_fn:DiceScore, epoch=0):
+def evaluate(flags, model, loader, score_fn:DiceScore, epoch=0):
     s = 0
     i = 0
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
@@ -74,8 +74,10 @@ def evaluate(flags, model, loader, loss_fn:DiceCELoss, score_fn:DiceScore, epoch
       output = output[:,:,:128,:256,:256]# todo temp
       label = label[:,:,:128,:256,:256]
       s += score_fn(output, label).mean().numpy()
+      if epoch == 3:
+        print('eval' ,s)
+        exit()
       del output, label, image
-    print(i)
     val_dice_score = s / i
 
     eval_metrics = {"epoch": epoch,
