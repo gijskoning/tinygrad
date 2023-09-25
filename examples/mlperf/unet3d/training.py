@@ -93,7 +93,7 @@ if __name__ == "__main__":
   # ~ doesnt work here
   # batch_size 2 is default: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/runtime/arguments.py
   # this is the real starting script: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/run_and_time.sh
-  flags = Flags(batch_size=2, verbose=True, data_dir='/home/gijs/code_projects/kits19/data')#os.environ["KITS19_DATA_DIR"])
+  flags = Flags(batch_size=2, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
   seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
   flags.evaluate_every = 1 # todo
