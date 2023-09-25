@@ -91,7 +91,7 @@ class UNet3D:
     if not filters:
       if debug_speed == 0:
         filters = [32, 64, 128, 256, 320]
-      if debug_speed == 1:
+      elif debug_speed == 1:
         filters = [min(4, i) for i in [32, 64, 128, 256, 320]]  # todo fix. This makes it fit on my pc
         filters[0] = 2  # this cannot be too big. 2 doesnt fit
       elif debug_speed == 2:
