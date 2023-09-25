@@ -1,4 +1,5 @@
 import random
+from functools import partial
 from typing import Dict, Optional
 
 import numpy as np
@@ -6,6 +7,7 @@ import torch
 # import torch.random
 from tqdm import tqdm
 
+from examples.mlperf.metrics import dice_ce_loss, get_dice_score
 from examples.mlperf.unet3d.inference import evaluate
 from extra.datasets.kits19 import sliding_window_inference
 from extra.lr_scheduler import MultiStepLR
@@ -44,6 +46,8 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
   training_step_fn = TinyJit(training_step) if getenv("JIT") else training_step
   model_eval_fn = TinyJit(model) if getenv("JIT") else model
 
+  if getenv("OVERFIT"):
+    loader = [(0, next(iter(train_loader)))]
   Tensor.training = True
   for epoch in range(1, flags.max_epochs + 1):
     print('epoch', epoch)
@@ -51,12 +55,16 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     if epoch <= flags.lr_warmup_epochs:
       lr_warmup(optimizer, flags.init_learning_rate, flags.learning_rate, epoch, flags.lr_warmup_epochs)
     loss_value = None
-    for iteration, batch in enumerate(tqdm(train_loader, disable=not flags.verbose)):
+    if not getenv("OVERFIT"):
+      loader = list(enumerate(tqdm(train_loader, disable=not flags.verbose)))
+
+    for iteration, batch in loader:
       print('optimizer.lr', optimizer.lr.numpy())
       print('iteration', iteration)
       image, label = batch
 
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
+
       image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(),dtype=dtype_img)
 
       output, loss_value = training_step_fn(image, label, optimizer.lr)
@@ -131,8 +139,8 @@ if __name__ == "__main__":
   flags = Flags(batch_size=2, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
   seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
-  # flags.evaluate_every = 20 # todo
-  # flags.start_eval_at = 100 # todo
+  flags.evaluate_every = 20 # todo
+  flags.start_eval_at = 1 # todo
   if seed is not None:
     Tensor._seed = seed
     np.random.seed(seed)
@@ -147,8 +155,11 @@ if __name__ == "__main__":
   print("Model params: {:,.0f}".format(sum([p.numel() for p in get_parameters(model)])))
 
   train_loader, val_loader = get_data_loaders(flags, 1, 0) # todo change to tinygrad loader
-  loss_fn = DiceCELoss()
-  score_fn = DiceScore()
+  # loss_fn = DiceCELoss()
+  loss_fn = partial(dice_ce_loss, n_classes=3)
+
+  # score_fn = DiceScore()
+  score_fn = get_dice_score # these might work better and are much simpler
   if getenv("OVERFIT"):
     val_loader = train_loader
   train(flags, model, train_loader, val_loader, loss_fn, score_fn)
