@@ -1,5 +1,5 @@
 
-import torch.functional as F
+import torch.nn.functional as F
 import torch
 import numpy as np
 
@@ -7,6 +7,14 @@ from tinygrad.helpers import dtypes
 
 from tinygrad.tensor import Tensor
 
+
+def to_one_hot_old(array, layout, channel_axis):
+  if len(array.shape) >= 5:
+    array = torch.squeeze(array, dim=channel_axis)
+  array = F.one_hot(array.long(), num_classes=3)
+  if layout == "NCDHW":
+    array = array.permute(0, 4, 1, 2, 3).float()
+  return array
 class Dice:
     def __init__(self,
                  to_onehot_x: bool = False,
@@ -27,8 +35,8 @@ class Dice:
     def __call__(self, prediction, target):
         """
         Input (default):
-            prediction: (B, 1, H, W, D) logit tensor
-            target: (B, 1, H, W, D) label tensor
+            prediction: (B, n_channels, H, W, D) logit tensor
+            target: (B, n_channels, H, W, D) label tensor
         """
         if self.layout == "NCDHW":
             channel_axis = 1
@@ -42,17 +50,13 @@ class Dice:
         if self.use_softmax:
             prediction = prediction.softmax(axis=channel_axis)
         elif self.use_argmax:
-            raise NotImplementedError("Argmax is not implemented yet.")
-            # prediction = torch.argmax(prediction, dim=channel_axis)
+            prediction = prediction.argmax(axis=channel_axis)
 
         if self.to_onehot_y:
-          # todo check this method with the reference model:
-          #   # https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
-          target = to_one_hot_tensor(target, channel_axis, self.layout)
+          target = to_one_hot(target, self.layout, channel_axis)
 
         if self.to_onehot_x:
-          raise Exception("fix this")
-          prediction = one_hot_tensor(prediction, channel_axis) # todo fix
+          prediction = to_one_hot(prediction, self.layout, channel_axis)
 
         if not self.include_background:
             assert num_pred_ch > 1, \
@@ -73,15 +77,6 @@ class Dice:
 
         return (2.0 * intersection + self.smooth_nr) / (target_sum + prediction_sum + self.smooth_dr)
 
-
-def to_one_hot(array: Tensor, channel_axis=1):
-    if len(array.shape) >= 5:
-      print('squeeze')
-      array = array.squeeze(dim=channel_axis)
-    _array = np.eye(3, dtype="int")[array.numpy()]
-    array = _array.transpose(0, 4, 1, 2, 3)
-    return Tensor(array)
-
 # >>> F.one_hot(torch.arange(0, 5) % 3)
 # tensor([[1, 0, 0],
 #         [0, 1, 0],
@@ -95,7 +90,7 @@ def to_one_hot(array: Tensor, channel_axis=1):
 #         [1, 0, 0, 0, 0],
 #         [0, 1, 0, 0, 0]])
 
-def to_one_hot_tensor(array: Tensor, channel_axis=1, layout="NCDHW"):
+def to_one_hot(array: Tensor, layout="NCDHW", channel_axis=1):
   # https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
   if len(array.shape) >= 5:
     array = array.squeeze(dim=channel_axis)
@@ -115,7 +110,7 @@ class DiceCELoss:
                      include_background=include_background)
 
   def __call__(self, y_pred, y_true):
-    ce = cross_entropy(y_pred, to_one_hot_tensor(y_true))
+    ce = cross_entropy(y_pred, to_one_hot(y_true))
 
     dice = (1.0 - self.dice(y_pred, y_true)).mean()
     return (dice + ce) / 2
@@ -128,8 +123,7 @@ class DiceScore:
                          use_argmax=use_argmax, layout=layout, include_background=include_background)
 
     def __call__(self, y_pred, y_true):
-        return self.dice(y_pred, y_true).mean(dim=0)
-
+        return self.dice(y_pred, y_true).mean(axis=0)
 
 # tests
 
@@ -139,7 +133,7 @@ def test_to_one_hot():
     assert labels.dtype == dtypes.int32
     assert labels.numpy()[0, 0, 1, 0, 0] == 1
     
-    one_hot = to_one_hot_tensor(labels, channel_axis=1)
+    one_hot = to_one_hot(labels, channel_axis=1)
     assert one_hot.shape == (2, 3, 2, 2, 2)
     assert one_hot.dtype == dtypes.float
     assert one_hot.numpy()[0, :, 1, 0, 0].tolist() == [0, 1, 0]

@@ -1,7 +1,7 @@
 from pathlib import Path
 import torch
 
-from examples.mlperf.unet3d.losses import Dice, cross_entropy, to_one_hot_tensor
+from examples.mlperf.unet3d.losses import Dice, cross_entropy, to_one_hot
 from tinygrad import nn
 from tinygrad.helpers import dtypes, getenv
 from tinygrad.jit import TinyJit
@@ -163,7 +163,7 @@ if __name__ == "__main__":
 
     def __call__(self, y_pred, y_true):
       # ce = cross_entropy(y_pred, y_true.squeeze(dim=1)).cast(dtypes.int64) # However this is reference todo should be long: int64??
-      ce = cross_entropy(y_pred, to_one_hot_tensor(y_true))  # this works for the est
+      ce = cross_entropy(y_pred, to_one_hot(y_true))  # this works for the est
 
       dice = (1.0 - self.dice(y_pred, y_true)).mean()
       return (dice + ce) / 2

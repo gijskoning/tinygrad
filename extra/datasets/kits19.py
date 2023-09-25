@@ -165,11 +165,11 @@ def gaussian_kernel(n, std):
   gaussian_3d /= gaussian_3d.max()
   return gaussian_3d
 
-def pad_input(volume, roi_shape, strides, padding_mode="constant", padding_val=-2.2, dim=3):
+def pad_input(volume, roi_shape, strides, padding_val=-2.2, dim=3):
   bounds = [(strides[i] - volume.shape[2:][i] % strides[i]) % strides[i] for i in range(dim)]
   bounds = [bounds[i] if (volume.shape[2:][i] + bounds[i]) >= roi_shape[i] else bounds[i] + strides[i] for i in range(dim)]
   paddings = [bounds[2]//2, bounds[2]-bounds[2]//2, bounds[1]//2, bounds[1]-bounds[1]//2, bounds[0]//2, bounds[0]-bounds[0]//2, 0, 0, 0, 0]
-  return F.pad(torch.from_numpy(volume), paddings, mode=padding_mode, value=padding_val).numpy(), paddings
+  return Tensor.pad2d(volume, paddings, value=padding_val), paddings
 
 def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), overlap=0.5):
   from tinygrad.jit import TinyJit
@@ -200,12 +200,12 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
   for i in range(0, strides[0] * size[0], strides[0]):
     for j in range(0, strides[1] * size[1], strides[1]):
       for k in range(0, strides[2] * size[2], strides[2]):
-        out = mdl_run(Tensor(inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k])).numpy()
+        out = mdl_run(inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k]).numpy()
         result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += out * norm_patch
         norm_map[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += norm_patch
   result /= norm_map
   result = result[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
-  return result, labels
+  return Tensor(result), labels
 
 if __name__ == "__main__":
   for X, Y in iterate(val=False):
