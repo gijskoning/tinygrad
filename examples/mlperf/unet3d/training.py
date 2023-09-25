@@ -88,7 +88,7 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
         is_successful = True
       elif eval_metrics["mean_dice"] < 1e-6:
         print("MODEL DIVERGED. ABORTING.", eval_metrics["mean_dice"], "<", 1e-6)
-        diverged = True
+        # diverged = True
 
     if is_successful or diverged:
       break
