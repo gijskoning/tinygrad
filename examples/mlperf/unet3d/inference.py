@@ -71,12 +71,12 @@ def evaluate(flags, model, loader, score_fn:DiceScore, epoch=0):
       # todo jit this inference window
       output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
       print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)
-      output = output[:,:,:128,:256,:256]# todo temp
-      label = label[:,:,:128,:256,:256]
+      # output = output[:,:,:128,:256,:256]# todo temp
+      # label = label[:,:,:128,:256,:256]
       s += score_fn(output, label).mean().numpy()
-      if epoch == 3:
-        print('eval' ,s)
-        exit()
+      # if epoch == 3:
+      #   print('eval' ,s)
+      #   exit()
       del output, label, image
     val_dice_score = s / i
 
