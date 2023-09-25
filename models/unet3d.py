@@ -102,9 +102,7 @@ class UNet3D:
         filters = [1, 1] # todo
       else: raise NotImplementedError
     else:
-      filters = [int(i) for i in filters if i != ","]
-      print('filters', filters)
-      # filters = list(filters)
+      filters = [int(i) for i in ''.join(filters).split(' ')]
     self.filters = filters
 
     self.inp = filters[:-1]

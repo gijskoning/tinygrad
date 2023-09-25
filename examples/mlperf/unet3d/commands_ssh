@@ -1,0 +1,23 @@
+git clone https://github.com/gijskoning/tinygrad.git
+cd tinygrad && pip install -e .
+pip install pip --upgrade
+pip install scipy
+pip install pycuda
+
+sudo apt install nvidia-opencl-icd #
+sudo apt install nvidia-cuda-toolkit # WORKED! THIS MIGHT BE THE ONLY USEFUL ONE
+sudo apt install pocl-opencl-icd # this fixed it!! Only for cpu though
+conda install ocl-icd-system
+sudo apt-get install ocl-icd-opencl-dev # for opencl. Didnt work yet
+conda install -c conda-forge pocl
+cd examples/mlperf/unet3d/
+
+git clone https://github.com/neheller/kits19
+cd kits19
+pip3 install -r requirements.txt
+python3 -m starter_code.get_imaging
+
+python3 preprocess_dataset.py --data_dir kits19/data --results_dir kits19/processed_data
+
+DATA_DIR=kits19/processed_data SPEED=1 FP16=1 JIT=1 python training.py
+GPU=1 DATA_DIR=kits19/processed_data SPEED=1  python training.py
