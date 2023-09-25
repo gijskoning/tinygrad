@@ -71,14 +71,15 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       Tensor.training = False
 
       eval_metrics = evaluate(flags, model, val_loader, loss_fn, score_fn, epoch)
-      eval_metrics["train_loss"] = sum(cumulative_loss) / len(cumulative_loss)
+      eval_metrics["train_loss"] = (sum(cumulative_loss) / len(cumulative_loss)).numpy().item()
 
       Tensor.training = True
-      print('eval_metrics', eval_metrics)
+      print('eval_metrics', [(k, f"{m:.7f}") for k,m in eval_metrics.items()])
       if eval_metrics["mean_dice"] >= flags.quality_threshold:
+        print("SUCCESSFULL", eval_metrics["mean_dice"], ">", flags.quality_threshold)
         is_successful = True
       elif eval_metrics["mean_dice"] < 1e-6:
-        print("MODEL DIVERGED. ABORTING.")
+        print("MODEL DIVERGED. ABORTING.", eval_metrics["mean_dice"], "<", 1e-6)
         diverged = True
 
     if is_successful or diverged:

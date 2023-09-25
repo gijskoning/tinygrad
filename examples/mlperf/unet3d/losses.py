@@ -15,6 +15,7 @@ def to_one_hot_old(array, layout, channel_axis):
   if layout == "NCDHW":
     array = array.permute(0, 4, 1, 2, 3).float()
   return array
+
 class Dice:
     def __init__(self,
                  to_onehot_x: bool = False,

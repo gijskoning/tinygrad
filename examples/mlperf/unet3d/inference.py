@@ -61,32 +61,25 @@ from tinygrad.tensor import Tensor
 #     return eval_metrics
 
 def evaluate(flags, model, loader, loss_fn:DiceCELoss, score_fn:DiceScore, epoch=0):
-    eval_loss = []
-    scores = []
-
+    s = 0
+    i = 0
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
       print("eval batch", i)
       image, label = batch
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
       image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(), dtype=dtype_img)
-
+      # todo jit this inference window
       output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
-      eval_loss_value = loss_fn(output, label).numpy()
-      score = score_fn(output, label).numpy() # this is too big?
-      scores.append(score)
-      eval_loss.append(eval_loss_value)
-
+      print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)
+      output = output[:,:,:128,:256,:256]# todo temp
+      label = label[:,:,:128,:256,:256]
+      s += score_fn(output, label).mean().numpy()
       del output, label, image
+    print(i)
+    val_dice_score = s / i
 
-    scores = Tensor.stack(scores, dim=0).mean(axis=0) # reduce over world_size
-    eval_loss = Tensor.stack(eval_loss, dim=0).mean(axis=0) # reduce over world_size
-
-    scores, eval_loss = scores.numpy(), float(eval_loss.numpy())
     eval_metrics = {"epoch": epoch,
-                    "L1 dice": scores[-2],
-                    "L2 dice": scores[-1],
-                    "mean_dice": (scores[-1] + scores[-2]) / 2,
-                    "eval_loss": eval_loss}
+                    "mean_dice": val_dice_score}
 
     return eval_metrics
 
