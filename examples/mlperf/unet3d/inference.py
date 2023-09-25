@@ -62,7 +62,6 @@ from tinygrad.tensor import Tensor
 
 def evaluate(flags, model, loader, score_fn:DiceScore, epoch=0):
     s = 0
-    i = 0
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
       print("eval batch", i)
       image, label = batch
@@ -78,7 +77,7 @@ def evaluate(flags, model, loader, score_fn:DiceScore, epoch=0):
       #   print('eval' ,s)
       #   exit()
       del output, label, image
-    val_dice_score = s / i
+    val_dice_score = s / (i+1)
 
     eval_metrics = {"epoch": epoch,
                     "mean_dice": val_dice_score}
