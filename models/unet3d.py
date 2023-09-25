@@ -90,11 +90,14 @@ class UNet3D:
   def __init__(self, in_channels, n_class, debug_speed=2):
     if debug_speed == 0:
       filters = [32, 64, 128, 256, 320]
-    elif debug_speed == 1:
+    if debug_speed == 1:
+      filters = [min(4, i) for i in [32, 64, 128, 256, 320]]  # todo fix. This makes it fit on my pc
+      filters[0] = 2  # this cannot be too big. 2 doesnt fit
+    elif debug_speed == 2:
       # filters = [max(1,i//16) for i in [32, 64, 128, 256, 320]] # todo fix. This makes it fit on my pc
       filters = [min(4, i) for i in [32, 64, 128, 256, 320]] # todo fix. This makes it fit on my pc
       filters[0] = 1  # this cannot be too big. 2 doesnt fit
-    elif debug_speed == 2:
+    elif debug_speed == 3:
       filters = [1, 1] # todo
     else: raise NotImplementedError
     self.filters = filters
