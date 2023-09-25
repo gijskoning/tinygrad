@@ -21,3 +21,6 @@ python3 preprocess_dataset.py --data_dir kits19/data --results_dir kits19/proces
 
 DATA_DIR=kits19/processed_data SPEED=1 FP16=1 JIT=1 python training.py
 GPU=1 DATA_DIR=kits19/processed_data SPEED=1  python training.py
+
+3090 cannot handle anything much bigger than this. At least not the first dim
+FILTERS="8 16 16 16 16" GPU=1 DATA_DIR=kits19/processed_data JIT=1 FP16=1 python training.py

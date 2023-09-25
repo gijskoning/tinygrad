@@ -4,6 +4,7 @@ import numpy as np
 
 from examples.mlperf.unet3d.losses import DiceCELoss, DiceScore
 from extra.datasets.kits19 import sliding_window_inference
+from tinygrad.helpers import dtypes, getenv
 from tinygrad.tensor import Tensor
 # def evaluate(flags, model, loader, loss_fn, score_fn, device, epoch=0, is_distributed=False):
 #     rank = get_rank()
@@ -64,15 +65,18 @@ def evaluate(flags, model, loader, loss_fn:DiceCELoss, score_fn:DiceScore, epoch
     scores = []
 
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
-        image, label = batch
-        image, label = Tensor(image.numpy()), Tensor(label.numpy())
-        output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
-        eval_loss_value = loss_fn(output, label)
-        scores.append(score_fn(output, label))
-        eval_loss.append(eval_loss_value)
-        
-        del output
-        del label
+      print("eval batch", i)
+      image, label = batch
+      dtype_img = dtypes.half if getenv("FP16") else dtypes.float
+      image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(), dtype=dtype_img)
+
+      output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
+      eval_loss_value = loss_fn(output, label).numpy()
+      score = score_fn(output, label).numpy() # this is too big?
+      scores.append(score)
+      eval_loss.append(eval_loss_value)
+
+      del output, label, image
 
     scores = Tensor.stack(scores, dim=0).mean(axis=0) # reduce over world_size
     eval_loss = Tensor.stack(eval_loss, dim=0).mean(axis=0) # reduce over world_size

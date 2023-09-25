@@ -103,6 +103,7 @@ class UNet3D:
       else: raise NotImplementedError
     else:
       filters = [int(i) for i in ''.join(filters).split(' ')]
+    print('filters', filters)
     self.filters = filters
 
     self.inp = filters[:-1]

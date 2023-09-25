@@ -48,8 +48,8 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       print('optimizer.lr', optimizer.lr.numpy())
       print('iteration', iteration)
       image, label = batch
-      dtype_img = dtypes.half
-      # dtype_img = dtypes.float
+
+      dtype_img = dtypes.half if getenv("FP16") else dtypes.float
       image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(),dtype=dtype_img)
 
       output, loss_value = step_fn(image, label, optimizer.lr)
@@ -65,24 +65,24 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       if flags.lr_decay_epochs:
         scheduler.step()
 
-    # if epoch == next_eval_at:
-    #   next_eval_at += flags.evaluate_every
-    #   del output
-    #   Tensor.training = False
-    #
-    #   eval_metrics = evaluate(flags, model, val_loader, loss_fn, score_fn, epoch)
-    #   eval_metrics["train_loss"] = sum(cumulative_loss) / len(cumulative_loss)
-    #
-    #   Tensor.training = True
-    #   print('eval_metrics', eval_metrics)
-    #   if eval_metrics["mean_dice"] >= flags.quality_threshold:
-    #     is_successful = True
-    #   elif eval_metrics["mean_dice"] < 1e-6:
-    #     print("MODEL DIVERGED. ABORTING.")
-    #     diverged = True
-    #
-    # if is_successful or diverged:
-    #   break
+    if epoch == next_eval_at:
+      del output, image, label
+      next_eval_at += flags.evaluate_every
+      Tensor.training = False
+
+      eval_metrics = evaluate(flags, model, val_loader, loss_fn, score_fn, epoch)
+      eval_metrics["train_loss"] = sum(cumulative_loss) / len(cumulative_loss)
+
+      Tensor.training = True
+      print('eval_metrics', eval_metrics)
+      if eval_metrics["mean_dice"] >= flags.quality_threshold:
+        is_successful = True
+      elif eval_metrics["mean_dice"] < 1e-6:
+        print("MODEL DIVERGED. ABORTING.")
+        diverged = True
+
+    if is_successful or diverged:
+      break
 
 if __name__ == "__main__":
 
