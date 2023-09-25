@@ -105,7 +105,7 @@ if __name__ == "__main__":
     np.random.seed(seed)
     torch.manual_seed(seed)
     random.seed(seed)
-  model = UNet3D(1, 3, debug_speed=getenv("SPEED", 3))
+  model = UNet3D(1, 3, debug_speed=getenv("SPEED", 3), filters=getenv("FILTERS", ()))
   if getenv("FP16"):
     weights = get_state_dict(model)
     for k, v in weights.items():
