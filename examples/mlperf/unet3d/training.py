@@ -15,6 +15,7 @@ from models.unet3d import UNet3D
 
 from tinygrad.nn import optim
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict
+from tinygrad.ops import Device
 from tinygrad.tensor import Tensor
 
 def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
@@ -89,6 +90,7 @@ if __name__ == "__main__":
   from examples.mlperf.unet3d.losses import DiceCELoss, DiceScore
   from examples.mlperf.unet3d.flags import Flags
   from models.unet3d import UNet3D
+  print('Device', Device.DEFAULT)
   import os
   # ~ doesnt work here
   # batch_size 2 is default: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/runtime/arguments.py
@@ -116,6 +118,7 @@ if __name__ == "__main__":
   score_fn = DiceScore()
   train(flags, model, train_loader, val_loader, loss_fn, score_fn)
 # FP16=1 JIT=1 python training.py
+# DATA_DIR=kits19/data_processed SPEED=1 FP16=1 JIT=1 python training.py
 # reference: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
 
 # todo eventually cleanup duplicate stuff. There is also things in extra/kits19
