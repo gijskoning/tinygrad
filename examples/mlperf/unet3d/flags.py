@@ -16,7 +16,7 @@ class Flags:
     num_workers: int = 1
     max_epochs: int = 4000
     quality_threshold: float = 0.908
-    start_eval_at: int = 1000
+    start_eval_at: int = 200
     evaluate_every: int = 20
     learning_rate: float = 0.8
     init_learning_rate: float = 1e-4

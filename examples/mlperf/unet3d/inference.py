@@ -66,7 +66,7 @@ def evaluate(flags, model, loader, score_fn:DiceScore, epoch=0):
       print("eval batch", i)
       image, label = batch
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
-      image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(), dtype=dtype_img)
+      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img)
       # todo jit this inference window
       output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
       print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)

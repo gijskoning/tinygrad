@@ -96,10 +96,11 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
 def test_sliding_inference():
   model = UNet3D(1, 3, debug_speed=getenv("SPEED", 3), filters=getenv("FILTERS", ()))
 
-  flags = Flags(batch_size=2, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
-  _, val_loader = get_data_loaders(flags, 1, 0) # todo change to tinygrad loader
+  flags = Flags(batch_size=1, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
+  flags.num_workers = 0
+  train_loader, val_loader = get_data_loaders(flags, 1, 0) # todo change to tinygrad loader
   dtype_img = dtypes.half
-  loader = val_loader
+  loader = train_loader
   # def get_score(image, label):
   #   output, label = sliding_window_inference(model, image, label, flags.val_input_shape, jit=Flags)
   #   # output = output[:, :, :128, :256, :256]  # todo temp
@@ -111,7 +112,7 @@ def test_sliding_inference():
   for iteration, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
     print(iteration)
     image, label = batch
-    image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(), dtype=dtype_img)
+    image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img)
     # output = get_score(image, label)# todo might need to give model?
     sliding_window_inference(model_jit, image, label, flags.val_input_shape)
     # output = output[:, :, :128, :256, :256]  # todo temp
@@ -130,8 +131,8 @@ if __name__ == "__main__":
   flags = Flags(batch_size=2, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
   seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
-  flags.evaluate_every = 20 # todo
-  flags.start_eval_at = 10 # todo
+  # flags.evaluate_every = 20 # todo
+  # flags.start_eval_at = 100 # todo
   if seed is not None:
     Tensor._seed = seed
     np.random.seed(seed)
