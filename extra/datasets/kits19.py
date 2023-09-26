@@ -1,5 +1,6 @@
 import random
 import functools
+import time
 from pathlib import Path
 import requests
 import numpy as np
@@ -165,6 +166,16 @@ def gaussian_kernel(n, std):
   gaussian_3d /= gaussian_3d.max()
   return gaussian_3d
 
+def test_add_with_padding():
+  small_m = Tensor.ones((2,3))
+  big_m = Tensor.zeros((3,5))
+  big_m_np = np.zeros((3,5))
+  add_s = (1,1)
+  big_m += small_m.pad2d((add_s[1], big_m.shape[-1] - (small_m.shape[-1] + add_s[1]),
+                          add_s[0], big_m.shape[-2] - (small_m.shape[-2] + add_s[0])), value=0)
+  big_m = big_m.numpy()
+  big_m_np[add_s[0]:add_s[0]+small_m.shape[0],add_s[1]:add_s[1]+small_m.shape[1]] += small_m.numpy()
+  assert np.testing.assert_allclose(big_m, big_m_np)
 def pad_input(volume, roi_shape, strides, padding_val=-2.2, dim=3):
   bounds = [(strides[i] - volume.shape[2:][i] % strides[i]) % strides[i] for i in range(dim)]
   bounds = [bounds[i] if (volume.shape[2:][i] + bounds[i]) >= roi_shape[i] else bounds[i] + strides[i] for i in range(dim)]
@@ -192,20 +203,55 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
   padded_shape = inputs.shape[2:]
   size = [(inputs.shape[2:][i] - roi_shape[i]) // strides[i] + 1 for i in range(dim)]
   result = np.zeros((1, 3, *padded_shape), dtype=np.float32)
+  result2 = Tensor.zeros((1, 3, *padded_shape))
   norm_map = np.zeros((1, 3, *padded_shape), dtype=np.float32)
+  norm_map2 = Tensor.zeros((1, 3, *padded_shape), requires_grad=False)
   norm_patch = gaussian_kernel(roi_shape[0], 0.125 * roi_shape[0])
-  norm_patch = np.expand_dims(norm_patch, axis=0)
+  norm_patch = np.expand_dims(norm_patch, axis=0).astype(np.float32)
+  norm_patch2 = Tensor(np.expand_dims(norm_patch, axis=0), requires_grad=False)
+  start_time = time.time()
+  test_np = False
   for i in range(0, strides[0] * size[0], strides[0]):
     for j in range(0, strides[1] * size[1], strides[1]):
       for k in range(0, strides[2] * size[2], strides[2]):
-        _input = inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k]
-        # print('_input shape' ,_input.shape)
-        out = model(inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k]).numpy()
-        result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += out * norm_patch
-        norm_map[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += norm_patch
-  result /= norm_map
-  result = result[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
-  return Tensor(result, device='CPU'), labels
+        out = model(inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k])
+        out.requires_grad = False
+        # out.realize()
+        # index result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] but then using padding
+        out2 = (out* norm_patch2).pad2d((k, result.shape[-1] - (roi_shape[2] + k),
+                           j, result.shape[-2] - (roi_shape[1] + j),
+                           i, result.shape[-3] - (roi_shape[0] + i)), value=0)
+
+        result2 += out2
+        # del out2
+        if test_np:
+          outnp = out.numpy()
+        # temp = np.zeros((1, 3, *padded_shape), dtype=np.float32)
+        # temp[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += outnp * norm_patch
+
+        # np.testing.assert_allclose(temp, out2.numpy(), rtol=1e-5, atol=1e-5)
+
+          result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += outnp * norm_patch
+          norm_map[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += norm_patch
+
+        norm_map2 += norm_patch2.pad2d((k, result.shape[-1] - (roi_shape[2] + k),
+                           j, result.shape[-2] - (roi_shape[1] + j),
+                           i, result.shape[-3] - (roi_shape[0] + i)), value=0)
+  print('eval time', time.time() - start_time)
+  if test_np:
+    np.testing.assert_allclose(result, result2.numpy(), rtol=1e-5, atol=1e-5)
+    result /= norm_map
+    result = result[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
+
+  result2 /= norm_map2
+  # np.testing.assert_allclose(result, result2.numpy())
+  result2 = result2[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
+  if test_np:
+    np.testing.assert_allclose(result, result2.numpy(), rtol=1e-5, atol=1e-5)
+  # return Tensor(result), labels
+  del norm_map2, norm_map, norm_patch2, norm_patch, out
+  # print(result2.requires_grad)
+  return result2.realize(), labels
 
 if __name__ == "__main__":
   for X, Y in iterate(val=False):
