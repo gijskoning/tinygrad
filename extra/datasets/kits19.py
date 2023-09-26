@@ -205,7 +205,7 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
         norm_map[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += norm_patch
   result /= norm_map
   result = result[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
-  return Tensor(result), labels
+  return Tensor(result, device='CPU'), labels
 
 if __name__ == "__main__":
   for X, Y in iterate(val=False):

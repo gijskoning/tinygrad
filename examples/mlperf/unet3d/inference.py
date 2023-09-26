@@ -68,7 +68,7 @@ def evaluate(flags, model, loader, score_fn, epoch=0):
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
       # image = image[:,:,:128,:128,:128]
       # image shape of evaluate loader is slighty bigger in size. This creates another model jit
-      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img) # todo
+      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img, device='CPU') # todo
       print('eval image shape',image.shape)
       # print('label shape',label.shape)
       # todo jit this inference window
@@ -76,7 +76,7 @@ def evaluate(flags, model, loader, score_fn, epoch=0):
       del image
 
       print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)
-      s += score_fn(output.cpu().realize(), label.cpu().realize()).mean().numpy() # to cpu saves a lot of memory
+      s += score_fn(output.cpu(), label).mean().numpy() # to cpu saves a lot of memory
       del output, label
 
     val_dice_score = s / (i+1)
