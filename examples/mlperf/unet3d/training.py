@@ -1,4 +1,5 @@
 import random
+import time
 
 import numpy as np
 import torch
@@ -40,8 +41,8 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     optimizer.step()
     return loss_value.realize() # loss_value.realize is needed
   training_step_fn = TinyJit(training_step) if getenv("JIT") else training_step
-  if getenv("OVERFIT"):
-    loader = [(0, next(iter(train_loader)))]
+  # if getenv("OVERFIT"):
+  #   loader = [(0, next(iter(train_loader)))]
   for epoch in range(1, flags.max_epochs + 1):
     Tensor.training = True
     print('epoch', epoch)
@@ -53,16 +54,18 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       loader = enumerate(tqdm(train_loader, disable=not flags.verbose))
       # print('len(loader)', len(loader))
       # loader = loader[:4]
-
+    start_time_epoch = time.time()
     for iteration, batch in loader:
-      print('optimizer.lr', optimizer.lr.numpy())
-      print('iteration', iteration)
+      # print('optimizer.lr', optimizer.lr.numpy())
       image, label = batch
 
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
       image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(), dtype=dtype_img)
 
       output = model(image)
+      if getenv("MODEL_OUT", 0):
+        output = model(image)
+        exit()
       del image
       loss_value = training_step_fn(output, label, optimizer.lr)
       del output, label
@@ -72,7 +75,7 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       if flags.lr_decay_epochs:
         scheduler.step()
 
-    if epoch == next_eval_at:
+    if epoch == next_eval_at and getenv("EVAL", 1):
       next_eval_at += flags.evaluate_every
       Tensor.training = False
 
@@ -90,7 +93,7 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
 
     if is_successful or diverged:
       break
-
+    print('epoch time', time.time()-start_time_epoch)
 def test_sliding_inference():
   model = UNet3D(1, 3, debug_speed=getenv("SPEED", 3), filters=getenv("FILTERS", ()))
 

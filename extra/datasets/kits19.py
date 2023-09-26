@@ -226,10 +226,10 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
         # del out2
         if test_np:
           outnp = out.numpy()
-        # temp = np.zeros((1, 3, *padded_shape), dtype=np.float32)
-        # temp[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += outnp * norm_patch
+          # temp = np.zeros((1, 3, *padded_shape), dtype=np.float32)
+          # temp[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += outnp * norm_patch
 
-        # np.testing.assert_allclose(temp, out2.numpy(), rtol=1e-5, atol=1e-5)
+          # np.testing.assert_allclose(temp, out2.numpy(), rtol=1e-5, atol=1e-5)
 
           result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += outnp * norm_patch
           norm_map[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += norm_patch
