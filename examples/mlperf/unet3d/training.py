@@ -97,19 +97,15 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     print('epoch time', time.time()-start_time_epoch)
 
 if __name__ == "__main__":
-  # test_sliding_inference()
   print('Device', Device.DEFAULT)
-  import os
-  # ~ doesnt work here
   # batch_size 2 is default: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/runtime/arguments.py
   # this is the real starting script: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/run_and_time.sh
-  # batch size 1 makes model jit just once. If batch size 2 is really needed then we need to change the evaluate function to also give 2 images
   # todo check batch size?
   print(kits19.BASEDIR)
   flags = Flags(batch_size=getenv("BATCH", 1), verbose=True, data_dir=getenv("DATA_DIR", kits19.BASEDIR))#os.environ["KITS19_DATA_DIR"])
   # flags = Flags(batch_size=getenv("BATCH", 1), verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/tinyrad/extra/datasets/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
-  seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
+  seed = flags.seed
   flags.evaluate_every = getenv("EVAL_STEPS", 20) # todo
   flags.start_eval_at = 1 # todo
   if seed is not None:
@@ -126,10 +122,8 @@ if __name__ == "__main__":
   print("Model params: {:,.0f}".format(sum([p.numel() for p in get_parameters(model)])))
 
   train_loader, val_loader = get_data_loaders(flags, 1, 0) # todo change to tinygrad loader
-  # loss_fn = DiceCELoss()
-  loss_fn = dice_ce_loss # assumes 3 classes
+  loss_fn = dice_ce_loss
 
-  # score_fn = DiceScore()
   score_fn = get_dice_score # these might work better and are much simpler
   if getenv("OVERFIT"):
     val_loader = train_loader
