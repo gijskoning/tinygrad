@@ -1,18 +1,12 @@
 git clone https://github.com/gijskoning/tinygrad.git
 cd tinygrad
 git checkout train_unet3d_gijs
-cd tinygrad
 pip install -e .
 pip install scipy
 
-sudo apt install nvidia-opencl-icd #
-sudo apt install nvidia-cuda-toolkit # WORKED! THIS MIGHT BE THE ONLY USEFUL ONE
-sudo apt install pocl-opencl-icd # this fixed it!! Only for cpu though
-conda install ocl-icd-system
-sudo apt-get install ocl-icd-opencl-dev # for opencl. Didnt work yet
-conda install -c conda-forge pocl
-cd examples/mlperf/unet3d/
+sudo apt install -y nvidia-cuda-toolkit # WORKED! FIXES "GPU"
 
+cd examples/mlperf/unet3d/
 git clone https://github.com/neheller/kits19
 cd kits19
 pip3 install -r requirements.txt
@@ -20,12 +14,14 @@ python3 -m starter_code.get_imaging
 cd ../
 python3 preprocess_dataset.py --data_dir kits19/data --results_dir kits19/processed_data
 
-HIP=1 WINO=1 DATA_DIR=kits19/data_processed SPEED=0 FP16=1 JIT=1 python training.py
+GPU=1 WINO=1 DATA_DIR=kits19/processed_data SPEED=0 FP16=1 JIT=1 python training.py
 DATA_DIR=kits19/processed_data SPEED=1 FP16=1 JIT=1 python training.py
 GPU=1 DATA_DIR=kits19/processed_data SPEED=1  python training.py
 
 3090 cannot handle anything much bigger than this. At least not the first dim
-FILTERS="8 16 16 16 16" GPU=1 DATA_DIR=kits19/processed_data JIT=1 FP16=1 python training.py
+TC=1 FILTERS="8 16 16 16 16" GPU=1 DATA_DIR=kits19/processed_data JIT=1 FP16=1 python training.py
+With wino only:
+TC=2 WINO=1 SPEED=1 GPU=1 DATA_DIR=kits19/processed_data JIT=1 FP16=1 python training.py
 
 Installing hip:
 https://docs.amd.com/en/docs-5.1.1/deploy/linux/quick_start.html
@@ -39,4 +35,12 @@ sudo apt install wget gnupg2
 wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key | sudo apt-key add -
 echo 'deb [arch=amd64] https://repo.radeon.com/rocm/apt/5.1.1 ubuntu main' | sudo tee /etc/apt/sources.list.d/rocm.list
 sudo apt update
-sudo apt install hip-base
+sudo apt install hip-base hip-runtime-nvidia # doesnt work yet. Maybe I need a different docker?
+# could work: sudo apt-get install rocm-hip-runtime -y
+# use ctrl+b then release, then c. To open a new terminal
+# ctrl+b, then n to switch
+
+# testing hip
+# from tinygrad.tensor import Tensor, Device
+# Device['HIP']
+# Device['GPU']
