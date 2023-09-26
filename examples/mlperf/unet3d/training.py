@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from examples.mlperf.metrics import dice_ce_loss, get_dice_score
 from examples.mlperf.unet3d.inference import evaluate
+from extra.datasets import kits19
 from extra.datasets.kits19 import sliding_window_inference
 from extra.lr_scheduler import MultiStepLR
 from extra.training import lr_warmup
@@ -78,8 +79,8 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     if epoch == next_eval_at and getenv("EVAL", 1):
       next_eval_at += flags.evaluate_every
       Tensor.training = False
-
-      eval_metrics = evaluate(flags, model, val_loader, score_fn, epoch)
+      eval_model = lambda x : model(x).numpy() # todo maybe change
+      eval_metrics = evaluate(flags, eval_model, val_loader, score_fn, epoch)
       eval_metrics["train_loss"] = (sum(cumulative_loss) / len(cumulative_loss)).numpy().item()
 
       Tensor.training = True
@@ -94,33 +95,6 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     if is_successful or diverged:
       break
     print('epoch time', time.time()-start_time_epoch)
-def test_sliding_inference():
-  model = UNet3D(1, 3, debug_speed=getenv("SPEED", 3), filters=getenv("FILTERS", ()))
-
-  flags = Flags(batch_size=1, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
-  flags.num_workers = 0
-  train_loader, val_loader = get_data_loaders(flags, 1, 0) # todo change to tinygrad loader
-  dtype_img = dtypes.half
-  loader = train_loader
-  # def get_score(image, label):
-  #   output, label = sliding_window_inference(model, image, label, flags.val_input_shape, jit=Flags)
-  #   # output = output[:, :, :128, :256, :256]  # todo temp
-  #   # label = label[:, :, :128, :256, :256]
-  #   # s += score_fn(output, label).mean().numpy()
-  #   return output.realize()
-  # get_score = TinyJit(get_score)
-  model_jit = TinyJit(model)
-  for iteration, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
-    print(iteration)
-    image, label = batch
-    image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img)
-    # output = get_score(image, label)# todo might need to give model?
-    sliding_window_inference(model_jit, image, label, flags.val_input_shape)
-    # output = output[:, :, :128, :256, :256]  # todo temp
-    # label = label[:, :, :128, :256, :256]
-    # s += score_fn(output, label).mean().numpy()
-    if iteration == 3:
-      break
 
 if __name__ == "__main__":
   # test_sliding_inference()
@@ -131,7 +105,9 @@ if __name__ == "__main__":
   # this is the real starting script: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/run_and_time.sh
   # batch size 1 makes model jit just once. If batch size 2 is really needed then we need to change the evaluate function to also give 2 images
   # todo check batch size?
-  flags = Flags(batch_size=getenv("BATCH", 1), verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
+  print(kits19.BASEDIR)
+  flags = Flags(batch_size=getenv("BATCH", 1), verbose=True, data_dir=getenv("DATA_DIR", kits19.BASEDIR))#os.environ["KITS19_DATA_DIR"])
+  # flags = Flags(batch_size=getenv("BATCH", 1), verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/tinyrad/extra/datasets/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
   seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
   flags.evaluate_every = getenv("EVAL_STEPS", 20) # todo

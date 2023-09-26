@@ -12,16 +12,17 @@ cd kits19
 pip3 install -r requirements.txt
 python3 -m starter_code.get_imaging
 cd ../
-python3 preprocess_dataset.py --data_dir kits19/data --results_dir kits19/processed_data
+python3 preprocess_dataset.py --data_dir kits19/data --results_dir ../../extra/datasets/kits19/data
 
-GPU=1 WINO=1 DATA_DIR=kits19/processed_data SPEED=0 FP16=1 JIT=1 python training.py
-DATA_DIR=kits19/processed_data SPEED=1 FP16=1 JIT=1 python training.py
-GPU=1 DATA_DIR=kits19/processed_data SPEED=1  python training.py
+
+GPU=1 WINO=1 SPEED=0 FP16=1 JIT=1 python training.py
+ SPEED=1 FP16=1 JIT=1 python training.py
+GPU=1  SPEED=1  python training.py
 
 3090 cannot handle anything much bigger than this. At least not the first dim
-TC=1 FILTERS="8 16 16 16 16" GPU=1 DATA_DIR=kits19/processed_data JIT=1 FP16=1 python training.py
+TC=1 FILTERS="8 16 16 16 16" GPU=1  JIT=1 FP16=1 python training.py
 With wino only:
-TC=2 WINO=1 SPEED=1 GPU=1 DATA_DIR=kits19/processed_data JIT=1 FP16=1 python training.py
+TC=2 WINO=1 SPEED=1 GPU=1  JIT=1 FP16=1 python training.py
 
 Installing hip:
 https://docs.amd.com/en/docs-5.1.1/deploy/linux/quick_start.html
