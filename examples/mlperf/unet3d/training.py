@@ -1,10 +1,7 @@
 import random
-from functools import partial
-from typing import Dict, Optional
 
 import numpy as np
 import torch
-# import torch.random
 from tqdm import tqdm
 
 from examples.mlperf.metrics import dice_ce_loss, get_dice_score
@@ -14,7 +11,6 @@ from extra.lr_scheduler import MultiStepLR
 from extra.training import lr_warmup
 from tinygrad.helpers import dtypes, getenv
 from tinygrad.jit import TinyJit
-from models.unet3d import UNet3D
 
 from tinygrad.nn import optim
 from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict
@@ -22,7 +18,6 @@ from tinygrad.ops import Device
 from tinygrad.tensor import Tensor
 
 from examples.mlperf.unet3d.data_loader import get_data_loaders
-from examples.mlperf.unet3d.losses import DiceCELoss, DiceScore
 from examples.mlperf.unet3d.flags import Flags
 from models.unet3d import UNet3D
 
@@ -156,7 +151,7 @@ if __name__ == "__main__":
 
   train_loader, val_loader = get_data_loaders(flags, 1, 0) # todo change to tinygrad loader
   # loss_fn = DiceCELoss()
-  loss_fn = partial(dice_ce_loss, n_classes=3)
+  loss_fn = dice_ce_loss # assumes 3 classes
 
   # score_fn = DiceScore()
   score_fn = get_dice_score # these might work better and are much simpler

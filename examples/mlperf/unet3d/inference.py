@@ -61,7 +61,7 @@ from tinygrad.tensor import Tensor
 #     return eval_metrics
 
 def evaluate(flags, model, loader, score_fn:DiceScore, epoch=0):
-    s = 0
+    s, i = 0, 0
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
       print("eval batch", i)
       image, label = batch
