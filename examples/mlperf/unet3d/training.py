@@ -50,9 +50,9 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       lr_warmup(optimizer, flags.init_learning_rate, flags.learning_rate, epoch, flags.lr_warmup_epochs)
     loss_value = None
     if not getenv("OVERFIT"):
-      loader = list(enumerate(tqdm(train_loader, disable=not flags.verbose)))
-      print('len(loader)', len(loader))
-      loader = loader[:4]
+      loader = enumerate(tqdm(train_loader, disable=not flags.verbose))
+      # print('len(loader)', len(loader))
+      # loader = loader[:4]
 
     for iteration, batch in loader:
       print('optimizer.lr', optimizer.lr.numpy())
@@ -127,10 +127,11 @@ if __name__ == "__main__":
   # batch_size 2 is default: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/runtime/arguments.py
   # this is the real starting script: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/run_and_time.sh
   # batch size 1 makes model jit just once. If batch size 2 is really needed then we need to change the evaluate function to also give 2 images
-  flags = Flags(batch_size=1, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
+  # todo check batch size?
+  flags = Flags(batch_size=getenv("BATCH", 1), verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
   seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
-  flags.evaluate_every = 20 # todo
+  flags.evaluate_every = getenv("EVAL_STEPS", 20) # todo
   flags.start_eval_at = 1 # todo
   if seed is not None:
     Tensor._seed = seed
@@ -158,5 +159,4 @@ if __name__ == "__main__":
 # DATA_DIR=kits19/data_processed SPEED=1 FP16=1 JIT=1 python training.py
 # HIP=1 WINO=1 DATA_DIR=kits19/data_processed SPEED=0 FP16=1 JIT=1 python training.py
 # reference: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
-
 # todo eventually cleanup duplicate stuff. There is also things in extra/kits19
