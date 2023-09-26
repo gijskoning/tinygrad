@@ -1,3 +1,5 @@
+import time
+
 from scipy import signal
 from tqdm import tqdm
 import numpy as np
@@ -65,20 +67,23 @@ def evaluate(flags, model, loader, score_fn, epoch=0):
     s, i = 0, 0
     eval_cpu = getenv("EVAL_CPU", 1)
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
-      print("eval batch", i)
+      # print("eval batch", i)
       image, label = batch
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
 
       image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img) # todo added [:1] for overfitting
 
-      print('eval image shape',image.shape)
+      # print('eval image shape',image.shape)
+      start_time = time.time()
       output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
       del image
       if eval_cpu:
         output = output.cpu().realize()
         label = label.cpu().realize()
-      print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)
+      # print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)
       s += score_fn(output, label).mean().numpy() # to cpu saves a lot of memory
+      print('eval time2', time.time() - start_time)
+
       del output, label
 
     val_dice_score = s / (i+1)

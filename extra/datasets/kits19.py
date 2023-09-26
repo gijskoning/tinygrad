@@ -220,7 +220,7 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
         # index result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] but then using padding
         out2 = (out* norm_patch2).pad2d((k, result.shape[-1] - (roi_shape[2] + k),
                            j, result.shape[-2] - (roi_shape[1] + j),
-                           i, result.shape[-3] - (roi_shape[0] + i)), value=0)
+                           i, result.shape[-3] - (roi_shape[0] + i)))
 
         result2 += out2
         # del out2
@@ -236,8 +236,7 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
 
         norm_map2 += norm_patch2.pad2d((k, result.shape[-1] - (roi_shape[2] + k),
                            j, result.shape[-2] - (roi_shape[1] + j),
-                           i, result.shape[-3] - (roi_shape[0] + i)), value=0)
-  print('eval time', time.time() - start_time)
+                           i, result.shape[-3] - (roi_shape[0] + i)))
   if test_np:
     np.testing.assert_allclose(result, result2.numpy(), rtol=1e-5, atol=1e-5)
     result /= norm_map
@@ -251,7 +250,9 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
   # return Tensor(result), labels
   del norm_map2, norm_map, norm_patch2, norm_patch, out
   # print(result2.requires_grad)
-  return result2.realize(), labels
+  print('eval time', time.time() - start_time)
+
+  return result2, labels
 
 if __name__ == "__main__":
   for X, Y in iterate(val=False):
