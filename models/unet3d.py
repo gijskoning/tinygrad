@@ -52,10 +52,7 @@ class UpsampleBlock:
     self.out_channels = out_channels
     self.upsample_conv = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2, padding=0, bias=True) # bias is true when norm_type == "None" (see reference mlperf)
     self.conv1 = ConvBlock(2 * out_channels, out_channels)
-    self.conv2 = ConvBlock(
-      out_channels,
-      out_channels,
-    )
+    self.conv2 = ConvBlock(out_channels, out_channels)
 
   def __call__(self, x, skip):
     x = self.upsample_conv(x)
