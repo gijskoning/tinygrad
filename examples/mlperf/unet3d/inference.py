@@ -66,12 +66,8 @@ def evaluate(flags, model, loader, score_fn, epoch=0):
       print("eval batch", i)
       image, label = batch
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
-      # image = image[:,:,:128,:128,:128]
-      # image shape of evaluate loader is slighty bigger in size. This creates another model jit
-      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img, device='CPU') # todo
+      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img, device='CPU') # todo added [:1] for overfitting
       print('eval image shape',image.shape)
-      # print('label shape',label.shape)
-      # todo jit this inference window
       output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
       del image
 

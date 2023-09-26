@@ -29,24 +29,21 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     scheduler = MultiStepLR(optimizer, milestones=flags.lr_decay_epochs, gamma=flags.lr_decay_factor)
   next_eval_at = flags.start_eval_at
 
-  # model = TinyJit(model) if getenv("JIT") else model # todo this might be nicer. Such that it can also be used for evaluate
+  model = TinyJit(model) if getenv("JIT") else model # todo this might be nicer. Such that it can also be used for evaluate
 
-  def training_step(x, label, lr):
+  def training_step(model_output, label, lr):
     print("No jit (yet)")
     optimizer.lr = lr
-    output = model(x)
-    loss_value = loss_fn(output, label)
+    loss_value = loss_fn(model_output, label)
     optimizer.zero_grad()
     loss_value.backward()
     optimizer.step()
-    return output, loss_value.realize() # loss_value.realize is needed
+    return loss_value.realize() # loss_value.realize is needed
   training_step_fn = TinyJit(training_step) if getenv("JIT") else training_step
-  model_eval_fn = TinyJit(model) if getenv("JIT") else model
-
   if getenv("OVERFIT"):
     loader = [(0, next(iter(train_loader)))]
-  Tensor.training = True
   for epoch in range(1, flags.max_epochs + 1):
+    Tensor.training = True
     print('epoch', epoch)
     cumulative_loss = []
     if epoch <= flags.lr_warmup_epochs:
@@ -65,9 +62,11 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
       image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(), dtype=dtype_img)
 
-      output, loss_value = training_step_fn(image, label, optimizer.lr)
-      del output, image, label
-      print('grad', loss_value.grad.numpy())
+      output = model(image)
+      del image
+      loss_value = training_step_fn(output, label, optimizer.lr)
+      del output, label
+      # print('grad', loss_value.grad.numpy())
       cumulative_loss.append(loss_value)
       print('loss_value', loss_value.numpy())
       if flags.lr_decay_epochs:
@@ -77,7 +76,7 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       next_eval_at += flags.evaluate_every
       Tensor.training = False
 
-      eval_metrics = evaluate(flags, model_eval_fn, val_loader, score_fn, epoch)
+      eval_metrics = evaluate(flags, model, val_loader, score_fn, epoch)
       eval_metrics["train_loss"] = (sum(cumulative_loss) / len(cumulative_loss)).numpy().item()
 
       Tensor.training = True
@@ -127,7 +126,8 @@ if __name__ == "__main__":
   # ~ doesnt work here
   # batch_size 2 is default: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/runtime/arguments.py
   # this is the real starting script: https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/run_and_time.sh
-  flags = Flags(batch_size=2, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
+  # batch size 1 makes model jit just once. If batch size 2 is really needed then we need to change the evaluate function to also give 2 images
+  flags = Flags(batch_size=1, verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
   seed = flags.seed # TODOOOOOO should check mlperf unet training too. It has different losses
   flags.evaluate_every = 20 # todo
