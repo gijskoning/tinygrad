@@ -1,9 +1,11 @@
 import time
 
+from diskcache import Cache
 from scipy import signal
 from tqdm import tqdm
 import numpy as np
 
+from examples.mlperf.metrics import get_dice_score_np
 from examples.mlperf.unet3d.losses import DiceCELoss, DiceScore
 from extra.datasets.kits19 import sliding_window_inference
 from tinygrad.helpers import dtypes, getenv
@@ -62,8 +64,12 @@ from tinygrad.tensor import Tensor
 #
 #     return eval_metrics
 from line_profiler_pycharm import profile
-@profile
-def evaluate(flags, model, loader, score_fn, epoch=0):
+
+cache = Cache('/home/gijs/code_projects/tinygrad/model_cache_inference')
+
+
+# @profile
+def evaluate(flags, model, loader, score_fn=get_dice_score_np, epoch=0):
     s, i = 0, 0
     eval_cpu = getenv("EVAL_CPU", 1)
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
@@ -71,17 +77,32 @@ def evaluate(flags, model, loader, score_fn, epoch=0):
       image, label = batch
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
 
-      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img) # todo added [:1] for overfitting
+      image, label = image.numpy()[:1], label.numpy()[:1] # todo added [:1] for overfitting
 
       # print('eval image shape',image.shape)
+      # image (1, 1, 168, 365, 365)
+      # eval: image (1, 1, 190, 392, 392)
       start_time = time.time()
-      output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
-      del image
-      if eval_cpu:
-        output = output.cpu().realize()
-        label = label.cpu().realize()
+
+      # @cache.memoize()
+      # def slide_cache(image, label):
+      #   print("SLIDE CACHE")
+      #   pred, label = sliding_window_inference(model, image, label)
+      #   return pred, label
+      #
+      # output, label = slide_cache(image, label)
+      output, label = sliding_window_inference(model, image, label)
+      label = label.squeeze(axis=1)
+      print('label shape', label.shape)
+
+      # del image
+      # if eval_cpu:
+      #   output = output.cpu().realize()
+      #   label = label.cpu().realize()
       # print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)
-      s += score_fn(output, label).mean().numpy() # to cpu saves a lot of memory
+      score = score_fn(output, label).mean()
+      s += score  # to cpu saves a lot of memory
+      print('score', score)
       print('eval time2', time.time() - start_time)
 
       del output, label

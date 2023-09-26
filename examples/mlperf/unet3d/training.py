@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from examples.mlperf.metrics import dice_ce_loss, get_dice_score
+from examples.mlperf.metrics import dice_ce_loss, get_dice_score, get_dice_score_np
 from examples.mlperf.unet3d.inference import evaluate
 from extra.datasets import kits19
 from extra.datasets.kits19 import sliding_window_inference
@@ -23,7 +23,7 @@ from examples.mlperf.unet3d.data_loader import get_data_loaders
 from examples.mlperf.unet3d.flags import Flags
 from models.unet3d import UNet3D
 
-def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
+def train(flags, model:UNet3D, train_loader, val_loader, loss_fn):
   is_successful, diverged = False, False
   optimizer = optim.SGD(get_parameters(model), lr=flags.learning_rate, momentum=flags.momentum, weight_decay=flags.weight_decay)
   # scaler = GradScaler() # scalar is only needed when doing mixed precision. The default args have this disabled.
@@ -31,9 +31,10 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     scheduler = MultiStepLR(optimizer, milestones=flags.lr_decay_epochs, gamma=flags.lr_decay_factor)
   next_eval_at = flags.start_eval_at
 
-  model = TinyJit(model) if getenv("JIT") else model # todo this might be nicer. Such that it can also be used for evaluate
+  jit_model = TinyJit(lambda x: model(x).realize()) if getenv("JIT") else model # todo this might be nicer. Such that it can also be used for evaluate
 
   def training_step(model_output, label, lr):
+    optimizer.zero_grad()
     print("No jit (yet)")
     optimizer.lr = lr
     loss_value = loss_fn(model_output, label)
@@ -42,10 +43,12 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     optimizer.step()
     return loss_value.realize() # loss_value.realize is needed
   training_step_fn = TinyJit(training_step) if getenv("JIT") else training_step
-  # if getenv("OVERFIT"):
-  #   loader = [(0, next(iter(train_loader)))]
+  if getenv("OVERFIT"):
+    loader = [(0, next(iter(train_loader)))]
   for epoch in range(1, flags.max_epochs + 1):
     Tensor.training = True
+    Tensor.no_grad = False
+
     print('epoch', epoch)
     cumulative_loss = []
     if epoch <= flags.lr_warmup_epochs:
@@ -63,9 +66,9 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
       image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(), dtype=dtype_img)
 
-      output = model(image)
+      output = jit_model(image)
       if getenv("MODEL_OUT", 0):
-        output = model(image)
+        output = jit_model(image)
         exit()
       del image
       loss_value = training_step_fn(output, label, optimizer.lr)
@@ -79,8 +82,11 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     if epoch == next_eval_at and getenv("EVAL", 1):
       next_eval_at += flags.evaluate_every
       Tensor.training = False
-      eval_model = lambda x : model(x).numpy() # todo maybe change
-      eval_metrics = evaluate(flags, eval_model, val_loader, score_fn, epoch)
+      Tensor.no_grad = True
+      dtype_img = dtypes.half if getenv("FP16") else dtypes.float
+
+      eval_model = lambda x : model(Tensor(x, dtype=dtype_img)).numpy() # todo maybe change
+      eval_metrics = evaluate(flags, eval_model, val_loader, epoch=epoch)
       eval_metrics["train_loss"] = (sum(cumulative_loss) / len(cumulative_loss)).numpy().item()
 
       Tensor.training = True
@@ -124,10 +130,10 @@ if __name__ == "__main__":
   train_loader, val_loader = get_data_loaders(flags, 1, 0) # todo change to tinygrad loader
   loss_fn = dice_ce_loss
 
-  score_fn = get_dice_score # these might work better and are much simpler
+  # score_fn = get_dice_score # these might work better and are much simpler
   if getenv("OVERFIT"):
     val_loader = train_loader
-  train(flags, model, train_loader, val_loader, loss_fn, score_fn)
+  train(flags, model, train_loader, val_loader, loss_fn)
 # FP16=1 JIT=1 python training.py
 # DATA_DIR=kits19/data_processed SPEED=1 FP16=1 JIT=1 python training.py
 # HIP=1 WINO=1 DATA_DIR=kits19/data_processed SPEED=0 FP16=1 JIT=1 python training.py

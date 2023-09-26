@@ -99,6 +99,7 @@ def eval_unet3d():
     # image = image[...,:128+width,:128+width,:128+width]
     # label = label[...,:128+width,:128+width,:128+width]
     # pred, label = sliding_window_inference(mdl_jit, image, label)
+    print('label shape', label.shape)
     @cache.memoize()
     def slide_cache(image,label):
       print("SLIDE CACHE")

@@ -126,11 +126,11 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
   for i in range(0, strides[0] * size[0], strides[0]):
     for j in range(0, strides[1] * size[1], strides[1]):
       for k in range(0, strides[2] * size[2], strides[2]):
-        start_time = time.time()
+        # start_time = time.time()
         out = model(inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k])
         result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += out * norm_patch
         norm_map[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += norm_patch
-        print(f"Time taken: {time.time() - start_time}")
+        # print(f"Time taken: {time.time() - start_time}")
   result /= norm_map
   result = result[..., paddings[4]:image_shape[0]+paddings[4], paddings[2]:image_shape[1]+paddings[2], paddings[0]:image_shape[2]+paddings[0]]
   return result, labels
