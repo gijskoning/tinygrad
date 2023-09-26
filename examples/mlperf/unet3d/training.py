@@ -29,6 +29,8 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     scheduler = MultiStepLR(optimizer, milestones=flags.lr_decay_epochs, gamma=flags.lr_decay_factor)
   next_eval_at = flags.start_eval_at
 
+  # model = TinyJit(model) if getenv("JIT") else model # todo this might be nicer. Such that it can also be used for evaluate
+
   def training_step(x, label, lr):
     print("No jit (yet)")
     optimizer.lr = lr
@@ -52,6 +54,8 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
     loss_value = None
     if not getenv("OVERFIT"):
       loader = list(enumerate(tqdm(train_loader, disable=not flags.verbose)))
+      print('len(loader)', len(loader))
+      loader = loader[:4]
 
     for iteration, batch in loader:
       print('optimizer.lr', optimizer.lr.numpy())
@@ -59,11 +63,10 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn, score_fn):
       image, label = batch
 
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
-
       image, label = Tensor(image.numpy(), dtype=dtype_img), Tensor(label.numpy(),dtype=dtype_img)
 
       output, loss_value = training_step_fn(image, label, optimizer.lr)
-
+      # image.detach(), output.detach(), label.detach() # todo needed?
       del output, image, label
       # print('eval model output', test_output[:1,0,0,0,:5])
       # print('model output', output[:1,0,0,0,:5].numpy())

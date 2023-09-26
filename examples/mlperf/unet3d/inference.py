@@ -60,23 +60,25 @@ from tinygrad.tensor import Tensor
 #
 #     return eval_metrics
 
-def evaluate(flags, model, loader, score_fn:DiceScore, epoch=0):
+def evaluate(flags, model, loader, score_fn, epoch=0):
     s, i = 0, 0
     for i, batch in enumerate(tqdm(loader, disable=not flags.verbose)):
       print("eval batch", i)
       image, label = batch
       dtype_img = dtypes.half if getenv("FP16") else dtypes.float
-      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img)
+      # image = image[:,:,:128,:128,:128]
+      # image shape of evaluate loader is slighty bigger in size. This creates another model jit
+      image, label = Tensor(image.numpy()[:1], dtype=dtype_img), Tensor(label.numpy()[:1], dtype=dtype_img) # todo
+      print('eval image shape',image.shape)
+      # print('label shape',label.shape)
       # todo jit this inference window
       output, label = sliding_window_inference(model, image, label, flags.val_input_shape)
+      del image
+
       print('output.shape', output.shape) #~ (1, 3, 190, 384, 384)
-      # output = output[:,:,:128,:256,:256]# todo temp
-      # label = label[:,:,:128,:256,:256]
-      s += score_fn(output, label).mean().numpy()
-      # if epoch == 3:
-      #   print('eval' ,s)
-      #   exit()
-      del output, label, image
+      s += score_fn(output.cpu().realize(), label.cpu().realize()).mean().numpy() # to cpu saves a lot of memory
+      del output, label
+
     val_dice_score = s / (i+1)
 
     eval_metrics = {"epoch": epoch,

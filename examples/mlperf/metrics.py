@@ -4,7 +4,6 @@ from collections import Counter
 import numpy as np
 
 from examples.mlperf.unet3d.losses import to_one_hot
-from tinygrad.helpers import dtypes
 from tinygrad.tensor import Tensor
 
 
@@ -50,18 +49,18 @@ def dice_ce_loss_old(y_pred, y_true, n_classes):
   return loss
 
 def get_dice_score(prediction, target, prediction_argmax=True, smooth_nr=1e-6, smooth_dr=1e-6):
+  prediction, target = prediction.float(), target.float()
   channel_axis = 1
   # both prediction and target should be one_hot
   # And only the prediction should be argmax
-  # one_hot(prediction.numpy())
   reduce_axis = list(range(2, len(prediction.shape)))
   if prediction_argmax:
     assert not prediction.requires_grad
     prediction = prediction.argmax(axis=channel_axis)
-    prediction = to_one_hot(prediction, channel_axis=channel_axis).float()
+    prediction = to_one_hot(prediction, channel_axis=channel_axis)
   else:
     prediction = prediction.softmax(axis=channel_axis)
-  target = to_one_hot(target, channel_axis=channel_axis).float()
+  target = to_one_hot(target, channel_axis=channel_axis)
 
   target = target[:, 1:]
   prediction = prediction[:, 1:]
@@ -73,15 +72,17 @@ def get_dice_score(prediction, target, prediction_argmax=True, smooth_nr=1e-6, s
   return (2.0 * intersection + smooth_nr) / (target_sum + prediction_sum + smooth_dr)
 
 def dice_ce_loss(prediction, target):
+  prediction, target = prediction.float(), target.float()
   # here prediction doesnt have one_hot. Only target has one_hot
   # here prediction has softmax - TRUE
-  target_one_hot = to_one_hot(target).float() # we cant compute the dice_score with float16 because of overflows
+  target_one_hot = to_one_hot(target) # we cant compute the dice_score with float16 because of overflows
   # todo use nn.cross entropy here?
   # overflow in reduce?????? Check with CPU=1
+  # cross_entropy = -(target_one_hot * prediction.softmax(1).clip(1e-8, 1).log()).mean()
   cross_entropy = -(target_one_hot * prediction.softmax(1).clip(1e-8, 1).log()).mean()
   dice_score = get_dice_score(prediction, target, prediction_argmax=False)
   dice_loss = (1. - dice_score).mean()
-  print('dice_loss', dice_score.numpy())
+  print('dice_loss', dice_loss.numpy())
   print('cross_entropy', cross_entropy.numpy())
   loss = (dice_loss + cross_entropy) / 2
   return loss
