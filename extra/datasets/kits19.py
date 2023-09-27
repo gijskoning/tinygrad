@@ -96,8 +96,6 @@ def pad_input(volume, roi_shape, strides, padding_mode="constant", padding_val=-
   bounds = [bounds[i] if (volume.shape[2:][i] + bounds[i]) >= roi_shape[i] else bounds[i] + strides[i] for i in range(dim)]
   paddings = [bounds[2]//2, bounds[2]-bounds[2]//2, bounds[1]//2, bounds[1]-bounds[1]//2, bounds[0]//2, bounds[0]-bounds[0]//2, 0, 0, 0, 0]
   return F.pad(torch.from_numpy(volume), paddings, mode=padding_mode, value=padding_val).numpy(), paddings
-  # return Tensor.pad2d(volume, paddings, value=padding_val), paddings
-
 
 def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), overlap=0.5):
   image_shape, dim = list(inputs.shape[2:]), len(inputs.shape[2:])
