@@ -3,7 +3,9 @@ import string
 from collections import Counter
 import numpy as np
 
-from examples.mlperf.unet3d.losses import to_one_hot
+from tinygrad.helpers import dtypes
+from tinygrad.tensor import Tensor
+
 
 def levenshtein(a, b):
   n, m = len(a), len(b)
@@ -31,16 +33,24 @@ def word_error_rate(x, y):
     scores += levenshtein(h_list, r_list)
   return float(scores) / words, float(scores), words
 
-def one_hot(arr, num_classes=3):
+def one_hot_np(arr, num_classes=3):
   res = np.eye(num_classes)[np.array(arr).reshape(-1)]
   arr = res.reshape(list(arr.shape) + [num_classes])
   arr = arr.transpose((0, 4, 1, 2, 3)).astype(np.float32)
   return arr
 
+def to_one_hot(array: Tensor, layout="NCDHW", channel_axis=1):
+  # https://github.com/mlcommons/training/blob/00f04c57d589721aabce4618922780d29f73cf4e/image_segmentation/pytorch/model/losses.py#L63
+  array = array.squeeze(dim=channel_axis) #todo could move squeeze up
+  num_classes = 3
+  array = Tensor.eye(num_classes, dtype=dtypes.int32, device=array.device)[array] # this is the F.one_hot function
+  array = array.permute(0, 4, 1, 2, 3)
+  return array
+
 def get_dice_score_np(prediction, target, channel_axis=1, smooth_nr=1e-6, smooth_dr=1e-6):
   channel_axis, reduce_axis = 1, tuple(range(2, len(prediction.shape)))
   prediction = prediction.argmax(axis=channel_axis)
-  prediction, target= one_hot(prediction)[:, 1:], one_hot(target)[:, 1:]
+  prediction, target= one_hot_np(prediction)[:, 1:], one_hot_np(target)[:, 1:]
   intersection = np.sum(prediction * target, axis=reduce_axis)
   target_sum = np.sum(target, axis=reduce_axis)
   prediction_sum = np.sum(prediction, axis=reduce_axis)
