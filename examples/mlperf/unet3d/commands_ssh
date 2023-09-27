@@ -25,6 +25,11 @@ TC=1 FILTERS="8 16 16 16 16" GPU=1  JIT=1 FP16=1 python training.py
 With wino only:
 TC=2 WINO=1 SPEED=1 GPU=1  JIT=1 FP16=1 python training.py
 EVAL_STEPS=50 TC=2 WINO=1 SPEED=0 GPU=1  JIT=1 FP16=0 python training.py
+# DEBUGGING
+PRETRAINED=1 EVAL_STEPS=50 TC=0 WINO=0 SPEED=0 GPU=1  JIT=1 FP16=0 python training.py
+FILTERS="8 16 16 16 16" EVAL_STEPS=50 TC=0 WINO=0 GPU=1  JIT=1 FP16=0 python training.py
+with a6000 this works:
+FILTERS="8 64 128 256 320" EVAL_STEPS=50 TC=0 WINO=0 GPU=1  JIT=1 FP16=0 python training.py
 
 
 Installing hip:

@@ -42,7 +42,7 @@ class UNet3D:
       filters = [int(i) for i in ''.join(filters).split(' ')]
 
     inp, out = filters[:-1], filters[1:]
-    self.input_block = DownsampleBlock(in_channels, filters[0], stride=1)
+    self.input_block = DownsampleBlock(in_channels, filters[0], stride=1) # todo maybe cast back to float16 after the first downsample block?
     self.downsample = [DownsampleBlock(i, o) for i, o in zip(inp, out)]
     self.bottleneck = DownsampleBlock(filters[-1], filters[-1])
     self.upsample = [UpsampleBlock(filters[-1], filters[-1])] + [UpsampleBlock(i, o) for i, o in zip(out[::-1], inp[::-1])]

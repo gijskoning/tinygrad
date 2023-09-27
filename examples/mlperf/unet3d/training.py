@@ -45,6 +45,7 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn):
   training_step_fn = TinyJit(training_step) if getenv("JIT") else training_step
   if getenv("OVERFIT"):
     loader = [(0, next(iter(train_loader)))]
+
   for epoch in range(1, flags.max_epochs + 1):
     Tensor.training = True
     Tensor.no_grad = False
@@ -58,7 +59,9 @@ def train(flags, model:UNet3D, train_loader, val_loader, loss_fn):
       loader = enumerate(tqdm(train_loader, disable=not flags.verbose))
       # print('len(loader)', len(loader))
       # loader = loader[:4]
-    start_time_epoch = time.time()
+    # 1 EPOCH with FILTERS="8 64 128 256 320" FP16=0 With 24 images currently takes 31 seconds. ~1.3 seconds per step. LOSS is actually going down!! To around 0.3 - 0.5
+    # score is now also at 0.3
+    start_time_epoch = time.time() # for 19 steps its currently ~5 seconds.
     for iteration, batch in loader:
       # print('optimizer.lr', optimizer.lr.numpy())
       image, label = batch
@@ -112,8 +115,8 @@ if __name__ == "__main__":
   # flags = Flags(batch_size=getenv("BATCH", 1), verbose=True, data_dir=getenv("DATA_DIR", '/home/gijs/code_projects/tinyrad/extra/datasets/kits19/data'))#os.environ["KITS19_DATA_DIR"])
   flags.num_workers = 0 # for debugging
   seed = flags.seed
-  flags.evaluate_every = getenv("EVAL_STEPS", 20) # todo
-  flags.start_eval_at = 1 # todo
+  flags.evaluate_every = getenv("EVAL_STEPS", 100) # todo
+  flags.start_eval_at = getenv("EVAL_START", 1) # todo
   if seed is not None:
     Tensor._seed = seed
     np.random.seed(seed)
