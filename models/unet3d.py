@@ -32,11 +32,7 @@ class UNet3D:
         filters = [min(4, i) for i in [32, 64, 128, 256, 320]]  # todo fix. This makes it fit on my pc
         filters[0] = 2  # this cannot be too big. 2 doesnt fit
       elif debug_speed == 2:
-        # filters = [max(1,i//16) for i in [32, 64, 128, 256, 320]] # todo fix. This makes it fit on my pc
-        filters = [min(4, i) for i in [32, 64, 128, 256, 320]] # todo fix. This makes it fit on my pc
-        filters[0] = 1  # this cannot be too big. 2 doesnt fit
-      elif debug_speed == 3:
-        filters = [1, 1] # todo
+        filters = [1, 1]
       else: raise NotImplementedError
     else:
       filters = [int(i) for i in ''.join(filters).split(' ')]

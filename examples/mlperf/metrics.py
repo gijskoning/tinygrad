@@ -4,8 +4,6 @@ from collections import Counter
 import numpy as np
 
 from examples.mlperf.unet3d.losses import to_one_hot
-from tinygrad.tensor import Tensor
-
 
 def levenshtein(a, b):
   n, m = len(a), len(b)

@@ -1,16 +1,11 @@
 import time
 
 from diskcache import Cache
-from scipy import signal
 from tqdm import tqdm
-import numpy as np
 
 from examples.mlperf.metrics import get_dice_score_np
-from examples.mlperf.unet3d.losses import DiceCELoss, DiceScore
 from extra.datasets.kits19 import sliding_window_inference
-from tinygrad.helpers import dtypes, getenv
-from tinygrad.tensor import Tensor
-from line_profiler_pycharm import profile
+from tinygrad.helpers import getenv
 
 cache = Cache('/home/gijs/code_projects/tinygrad/model_cache_inference')
 
