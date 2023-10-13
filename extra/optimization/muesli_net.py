@@ -102,6 +102,12 @@ class Prediction(nn.Module):
       p, v = self(torch.from_numpy(rp).float().unsqueeze(0))
     return p.cpu().numpy()[0], v.cpu().numpy()[0][0]
 
+  def value(self, rp):
+    h_v = F.relu(self.linear1_v(rp))
+    h_v = F.relu(self.linear2_v(h_v))
+    h_v = self.linear3_v(h_v)
+    # return h_v
+    return torch.tanh(h_v)*3 # todo assumes everything is between -3 and 3
 
 class Dynamics(nn.Module):
   '''Abstract state transition'''
@@ -131,8 +137,7 @@ class Net(nn.Module):
 
   def __init__(self):
     super().__init__()
-    # state = State()
-    input_shape = State.feature_shape()
+    # input_shape = State.feature_shape()
     action_input_shape = State.action_feature()
     action_output_shape = State.action_length()
     # rp_shape = (num_filters, *input_shape[1:]) # for now no dynamics
@@ -141,58 +146,74 @@ class Net(nn.Module):
     self.prediction = Prediction(action_input_shape, action_output_shape)
     # self.dynamics = Dynamics(rp_shape, action_shape)
 
-  # def predict(self, state0, path):
-  #   '''Predict p and v from original state and path'''
-  #   outputs = []
-  #   x = state0.feature()
-  #   rp = self.representation.inference(x)
-  #   outputs.append(self.prediction.inference(rp))
-  #   for action in path:
-  #     a = state0.action_feature(action)
-  #     rp = self.dynamics.inference(rp, a)
-  #     outputs.append(self.prediction.inference(rp))
-  #   return outputs
+  def predict(self, state0, path):
+    '''Predict p and v from original state and path'''
+    outputs = []
+    x = state0.feature()
+    rp = self.representation.inference(x)
+    outputs.append(self.prediction.inference(rp))
+    for action in path:
+      a = state0.action_feature(action)
+      rp = self.dynamics.inference(rp, a)
+      outputs.append(self.prediction.inference(rp))
+    return outputs
 
 
 class State:
 
   def __init__(self, ast_str):
-    self.orginal_lin = ast_str_to_lin(ast_str)  # debug single ast
-
-    rawbufs = bufs_from_lin(self.orginal_lin)
-    self.tm = self.last_tm = self.base_tm = time_linearizer(self.orginal_lin, rawbufs)
-    self.state_lin = deepcopy(self.orginal_lin)
+    self.ast_str = ast_str
+    self.original_lin = ast_str_to_lin(ast_str)  # debug single ast
+    self.tm = self.last_tm = self.base_tm = None
+    # self.rawbufs = bufs_from_lin(self.original_lin)
+    # rawbufs = bufs_from_lin(self.original_lin)
+    self.lin = deepcopy(self.original_lin)
     # print(self.state_lin)
     self.steps = 0
     self.terminal = False
+    self._feature = None
 
   def step(self, act) -> 'State':
     # assert isinstance(act, int), f'act must be int, got {act, type(act)}'
     state = deepcopy(self)
+    state._feature = None
+    # state = State(ast_str=self.ast_str)
+    # state.steps = self.steps
+    # state.rawbufs = self.rawbufs
+    # state.state_lin = deepcopy(self.state_lin)
+    # state.tm,state.last_tm,state.base_tm = self.tm,self.last_tm,self.base_tm
+
     state.steps += 1
     state.terminal = state.steps == MAX_DIMS - 1 or act == 0
     if act == 0:
       return state
-    state.state_lin.apply_opt(search.actions[act - 1])
+    state.lin.apply_opt(search.actions[act - 1])
     # state.state_lin =
     return state
 
   def terminal_reward(self):
     try:
-      rawbufs = bufs_from_lin(self.orginal_lin)
-
-      # lin.apply_opt(ACTIONS[act - 1])
-      tm = time_linearizer(self.state_lin, rawbufs)
-      if math.isinf(tm): raise Exception("failed")
-      # rews.append(((self.last_tm - self.tm) / self.base_tm))
+      rawbufs = bufs_from_lin(self.original_lin)
+      if self.base_tm is None:
+        self.tm = self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+        assert not math.isinf(self.tm)
+      tm = time_linearizer(self.lin, rawbufs)
+      assert not math.isinf(tm)
+      # time_penalty = ((self.last_tm - tm) / self.base_tm)
       reward = ((self.last_tm - tm) / self.base_tm)
+      # time_penalty = (self.last_tm - tm)
       self.last_tm = tm
-    except Exception:
+    except AssertionError as e:
+      print(e)
       reward = -0.5
+
     return reward
 
   def feature(self):
-    return lin_to_feats(self.state_lin)
+
+    # if self._feature is None:
+    #   self._feature = lin_to_feats(self.lin)
+    return lin_to_feats(self.lin)
 
   @staticmethod
   def feature_shape():
@@ -210,7 +231,31 @@ class State:
     # mask valid actions
     # probs = net(Tensor([feat])).exp()[0].numpy()
     valid_action_mask = np.zeros(self.action_length(), dtype=np.float32)
-    for x in get_linearizer_actions(self.state_lin): valid_action_mask[x] = 1
+    for x in get_linearizer_actions(self.lin): valid_action_mask[x] = 1
     p_root *= valid_action_mask
     p_root /= sum(p_root)
     return p_root
+
+  def get_valid_action(self, probs):
+    probs = deepcopy(probs)
+
+    for j in range(len(probs)):
+      act = np.random.choice(len(probs), p=probs)
+      try:
+        lin = self.step(act).lin
+        up, lcl = 1, 1
+        try:
+          for s, c in zip(lin.full_shape, lin.colors()):
+            if c in {"magenta", "yellow"}: up *= s
+            if c in {"cyan", "green", "white"}: lcl *= s
+          if up <= 256 and lcl <= 256:
+            return act
+        except Exception as e:
+          pass
+          # print("exception at step", e)
+      except AssertionError as e:
+        pass
+      probs[act] = 0
+      _sum = probs.sum()
+      assert _sum > 0., f'{j, len(probs)}'
+      probs = probs / _sum
