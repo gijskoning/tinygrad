@@ -4,7 +4,7 @@ from tinygrad.nn import Linear
 from tinygrad.tensor import Tensor
 from tinygrad.nn.optim import Adam
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
-from tinygrad.codegen.search import actions
+from tinygrad.codegen.search import ACTIONS
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats, assert_same_lin
 
 INNER = 32
@@ -12,7 +12,7 @@ class PolicyNet:
   def __init__(self):
     self.l1 = Linear(240,INNER)
     self.l2 = Linear(INNER,INNER)
-    self.l3 = Linear(INNER,1+len(actions))
+    self.l3 = Linear(INNER, 1 + len(ACTIONS))
   def __call__(self, x):
     x = self.l1(x).relu()
     x = self.l2(x).relu()
@@ -37,7 +37,7 @@ if __name__ == "__main__":
     lin2 = deepcopy(lin)
     for o in linhc.applied_opts:
       X.append(lin_to_feats(lin2))
-      Y.append(actions.index(o)+1)
+      Y.append(ACTIONS.index(o) + 1)
       lin2.apply_opt(o)
     X.append(lin_to_feats(lin2))
     Y.append(0)

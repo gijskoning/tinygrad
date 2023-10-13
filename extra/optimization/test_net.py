@@ -6,7 +6,7 @@ from copy import deepcopy
 from tinygrad.helpers import getenv, colored
 from tinygrad.tensor import Tensor
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
-from tinygrad.codegen.search import bufs_from_lin, time_linearizer, actions, get_linearizer_actions
+from tinygrad.codegen.search import bufs_from_lin, time_linearizer, ACTIONS, get_linearizer_actions
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 from extra.optimization.pretrain_policynet import PolicyNet
 from extra.optimization.pretrain_valuenet import ValueNet
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         act = dist.argmax()
       if act == 0: break
       try:
-        lin.apply_opt(actions[act-1])
+        lin.apply_opt(ACTIONS[act - 1])
       except Exception:
         print("FAILED")
         break

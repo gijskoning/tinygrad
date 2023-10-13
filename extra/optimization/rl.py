@@ -3,7 +3,7 @@ import numpy as np
 import math, random
 from tinygrad.tensor import Tensor
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
-from tinygrad.codegen.search import actions, bufs_from_lin, time_linearizer, get_linearizer_actions
+from tinygrad.codegen.search import ACTIONS, bufs_from_lin, time_linearizer, get_linearizer_actions
 from tinygrad.nn.optim import Adam
 from extra.optimization.pretrain_policynet import PolicyNet
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
@@ -31,7 +31,7 @@ if __name__ == "__main__":
       probs = net(Tensor([feat])).exp()[0].numpy()
 
       # mask valid actions
-      valid_action_mask = np.zeros((len(actions)+1), dtype=np.float32)
+      valid_action_mask = np.zeros((len(ACTIONS) + 1), dtype=np.float32)
       for x in get_linearizer_actions(lin): valid_action_mask[x] = 1
       probs *= valid_action_mask
       probs /= sum(probs)
@@ -42,7 +42,7 @@ if __name__ == "__main__":
         rews.append(0)
         break
       try:
-        lin.apply_opt(actions[act-1])
+        lin.apply_opt(ACTIONS[act - 1])
         tm = time_linearizer(lin, rawbufs)
         if math.isinf(tm): raise Exception("failed")
         rews.append(((last_tm-tm)/base_tm))
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     if len(all_feats) >= BS:
       Tensor.no_grad, Tensor.training = False, True
       x = Tensor(all_feats[:BS])
-      mask = np.zeros((BS, len(actions)+1), dtype=np.float32)
+      mask = np.zeros((BS, len(ACTIONS) + 1), dtype=np.float32)
       mask[range(BS), all_acts[:BS]] = all_rews[:BS]
       loss = -(net(x) * Tensor(mask)).mean()
       optim.zero_grad()
