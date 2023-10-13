@@ -323,6 +323,7 @@ class OptimizedKernel(Kernel):
   def apply_opt(self, opt:Opt):
     self.applied_opts.append(opt)
     axis = opt.axis + (self.first_reduce if opt.op == OptOps.UNROLL else 0)
+    assert axis < self.shape_len, f"axis to big axis {axis} shape_len {self.shape_len}"
     assert self.full_shape[axis] % opt.amt == 0, "no longer valid shift"
     if opt.op == OptOps.LOCAL:        # cyan
       assert axis < (self.first_reduce-self.local_dims), "can't local a local or reduce"

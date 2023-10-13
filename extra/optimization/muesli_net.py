@@ -8,7 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from extra.optimization.helpers import MAX_DIMS, ast_str_to_lin, lin_to_feats
-from tinygrad.codegen.search import ACTIONS, bufs_from_lin, get_linearizer_actions, time_linearizer
+from tinygrad.codegen import search
+from tinygrad.codegen.search import bufs_from_lin, get_linearizer_actions, time_linearizer
 
 num_filters = 4  # todo was 16
 num_blocks = 1  # was 4
@@ -172,7 +173,7 @@ class State:
     state.terminal = state.steps == MAX_DIMS - 1 or act == 0
     if act == 0:
       return state
-    state.state_lin.apply_opt(ACTIONS[act - 1])
+    state.state_lin.apply_opt(search.actions[act - 1])
     # state.state_lin =
     return state
 
@@ -195,15 +196,15 @@ class State:
 
   @staticmethod
   def feature_shape():
-    return (888,)  # could also be 888 with sts
+    return (1021,)  # could also be 888 with sts
 
   @staticmethod
   def action_feature():
-    return (888,)  # could also be 888 with sts
+    return (1021,)  # could also be 888 with sts
 
   @staticmethod
   def action_length():
-    return len(ACTIONS) + 1
+    return len(search.actions) + 1
 
   def get_masked_probs(self, p_root):
     # mask valid actions

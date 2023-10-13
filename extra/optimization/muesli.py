@@ -11,7 +11,6 @@ from torch import nn, optim
 from extra.optimization.muesli_net import Net, State
 from tinygrad.tensor import Tensor
 from tinygrad.nn.state import get_parameters, get_state_dict, safe_save, safe_load, load_state_dict
-from tinygrad.codegen.search import ACTIONS, bufs_from_lin, time_linearizer, get_linearizer_actions
 from extra.optimization.helpers import load_worlds, ast_str_to_lin, lin_to_feats
 
 
