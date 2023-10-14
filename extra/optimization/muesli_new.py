@@ -51,9 +51,10 @@ class State:
     info = None
     if state.terminal:
       state.failed, r = state.reward()
-      state.terminal = state.terminal and not state.failed
       return state, state.feature(), r, state.terminal, info
     state.lin.apply_opt(search.actions[act - 1])
+    state.tm = None
+
     # state.state_lin =
     # return state
     state.failed, r = state.reward()
@@ -63,6 +64,7 @@ class State:
   def _step(self, act):
     state = deepcopy(self)
     state.lin.apply_opt(search.actions[act - 1])
+    state.tm = None
     return state
 
   def set_base_tm(self):
@@ -76,14 +78,15 @@ class State:
     try:
       rawbufs = bufs_from_lin(self.original_lin)
       if self.base_tm is None:
-        self.tm = self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+        self.base_tm = time_linearizer(self.original_lin, rawbufs)
         assert not math.isinf(self.tm)
-      tm = time_linearizer(self.lin, rawbufs)
-      assert not math.isinf(tm)
+      if self.tm is None:
+        self.tm = time_linearizer(self.original_lin, rawbufs)
+        assert not math.isinf(self.tm)
       # time_penalty = ((self.last_tm - tm) / self.base_tm)
       # reward = ((self.last_tm - tm) / self.base_tm)
-      reward = (self.last_tm - tm)
-      self.last_tm = tm
+      reward = (self.last_tm - self.tm)
+      self.last_tm = self.tm
     except AssertionError as e:
       # print(e)
       reward = -self.base_tm
@@ -134,7 +137,7 @@ class State:
             if c in {"cyan", "green", "white"}: lcl *= s
           if up <= 256 and lcl <= 256:
             return act
-        except AssertionError as e:
+        except (IndexError, AssertionError) as e:
           pass
           # print("exception at color", e)
       except AssertionError as e:
@@ -403,7 +406,7 @@ class Agent(nn.Module):
       self.action_traj.append(action)
       self.P_traj.append(P.cpu().numpy())
       self.r_traj.append(r)
-      # print('step reward', r, 'done', done)
+      print('action', action,'step reward', r, 'done', done)
       # game_score += r
 
       ## For fix lunarlander-v2 env does not return reward -100 when 'TimeLimit.truncated'
@@ -700,7 +703,8 @@ class Agent(nn.Module):
       self.optimizer.step()
 
       ## target network(prior parameters) moving average update
-      alpha_target = 0.01
+      # alpha_target = 0.01
+      alpha_target = 0.05
       params1 = self.named_parameters()
       params2 = target.named_parameters()
       dict_params2 = dict(params2)
@@ -746,7 +750,7 @@ score_arr = []
 # env = State()
 num_state_stack = 2
 train_updates = 5
-
+start_training_epoch = 0 # todo somehow increasing this doesnt work
 ast_strs = load_worlds()
 env = State(ast_strs[0])
 observation_space = env.feature_shape()
@@ -774,7 +778,7 @@ for i in range(episode_nums):
   score_arr.append(game_score)
   if i % 10 == 0:
     mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
-    # print('episode, avg, score, last_r, len\n', i, mean_score, int(game_score), last_r, frame)
+    print('episode, avg, score\n', i, mean_score, game_score)
 
   if i % 100 == 0:
     torch.save(agent.state_dict(), 'weights.pt')
@@ -783,8 +787,8 @@ for i in range(episode_nums):
     torch.save(agent.state_dict(), 'weights.pt')
     print('Done')
     break
-
-  agent.update_weights_mu(target)
+  if i >= start_training_epoch:
+    agent.update_weights_mu(target)
   # writer.close()
 
 torch.save(agent.state_dict(), 'weights.pt')
