@@ -375,10 +375,10 @@ class Agent(nn.Module):
     self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=4000, end_learning_rate=0.0000)
     self.to(device)
 
-    self.state_traj = []
-    self.action_traj = []
-    self.P_traj = []
-    self.r_traj = []
+    # self.state_traj = []
+    # self.action_traj = []
+    # self.P_traj = []
+    # self.r_traj = []
 
     self.state_replay = []
     self.action_replay = []
@@ -410,6 +410,7 @@ class Agent(nn.Module):
     base_tm = self.env.set_base_tm()
     state = self.env.feature()
     state_dim = len(state)
+    state_traj, action_traj, P_traj, r_traj = [], [], [], []
     for i in range(max_timestep):
       start_state = state
       if i == 0:
@@ -428,12 +429,12 @@ class Agent(nn.Module):
       self.env, state, r, done, info = self.env.step(action, dense_reward=True) # todo fix self.env
       if i == 0:
         for _ in range(num_state_stack):
-          self.state_traj.append(start_state)
+          state_traj.append(start_state)
       else:
-        self.state_traj.append(start_state)
-      self.action_traj.append(action)
-      self.P_traj.append(P.cpu().numpy())
-      self.r_traj.append(r)
+        state_traj.append(start_state)
+      action_traj.append(action)
+      P_traj.append(P.cpu().numpy())
+      r_traj.append(r)
       print('action', action,'step reward', r, 'done', done)
       # game_score += r
 
@@ -451,17 +452,17 @@ class Agent(nn.Module):
 
     # for update inference over trajectory length
     for _ in range(5):
-      self.state_traj.append(np.zeros_like(state))
+      state_traj.append(np.zeros_like(state))
 
     for _ in range(6):
-      self.r_traj.append(0.0)
-      self.action_traj.append(-1)
+      r_traj.append(0.0)
+      action_traj.append(-1)
 
       # traj append to replay
-    self.state_replay.append(self.state_traj)
-    self.action_replay.append(self.action_traj)
-    self.P_replay.append(self.P_traj)
-    self.r_replay.append(self.r_traj)
+    self.state_replay.append(state_traj)
+    self.action_replay.append(action_traj)
+    self.P_replay.append(P_traj)
+    self.r_replay.append(r_traj)
 
     # writer.add_scalars('Selfplay',
     #                    {'lastreward': r,
@@ -488,6 +489,7 @@ class Agent(nn.Module):
     regularizer_multiplier: 5
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
+
     print("update_weights_mu")
     for _ in range(train_updates):
       state_traj = []
@@ -590,12 +592,12 @@ class Agent(nn.Module):
                                      )
       first_term = -1 * importance_weight * (G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) / under
 
-      ##lookahead inferences (one step look-ahead to some actions to estimate q_prior, from target network)
+      ## eq. 14. Lookahead inferences (one step look-ahead to some actions to estimate q_prior, from target network)
       with torch.no_grad():
         r1_arr = []
         v1_arr = []
         a1_arr = []
-        for _ in range(self.action_space):  # sample <= N(action space), now N
+        for _ in range(lookahead_samples):  # sample <= N(action space), now N
           action1_stack = []
           for p in t_first_P:
             action1_stack.append(np.random.choice(np.arange(self.action_space), p=p.detach().cpu().numpy()))
@@ -606,30 +608,30 @@ class Agent(nn.Module):
           v1_arr.append(to_scalar(v1))
           a1_arr.append(torch.tensor(action1_stack))
 
-          ## z_cmpo_arr (eq.12)
+      ## z_cmpo_arr (eq.12)
       with torch.no_grad():
-        exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + 0.997 * v1_arr[k] - to_scalar(t_first_v_logits)) / under, -1, 1))
-                            .tolist() for k in range(self.action_space)]
+        exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + 0.997 * v1_arr[k] - to_scalar(t_first_v_logits)) / under, -1, 1)) # -c, c
+                            .tolist() for k in range(lookahead_samples)]
         exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
         z_cmpo_arr = []
-        for k in range(self.action_space):
-          z_cmpo = (1 + torch.sum(exp_clip_adv_arr[k], dim=0) - exp_clip_adv_arr[k]) / self.action_space
+        for k in range(lookahead_samples): # k != i is fixed by "- exp_clip_adv_arr[k]"
+          z_cmpo = (1 + torch.sum(exp_clip_adv_arr[k], dim=0) - exp_clip_adv_arr[k]) / lookahead_samples
           z_cmpo_arr.append(z_cmpo.tolist())
       z_cmpo_arr = torch.tensor(z_cmpo_arr).to(device)
 
       ## L_pg_cmpo second term (eq.11)
       second_term = 0
-      for k in range(self.action_space):
+      for k in range(lookahead_samples):
         second_term += exp_clip_adv_arr[k] / z_cmpo_arr[k] * torch.log(first_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device)))
       regularizer_multiplier = 5
-      second_term *= -1 * regularizer_multiplier / self.action_space
+      second_term *= -1 * regularizer_multiplier / lookahead_samples
 
       ## L_pg_cmpo
       L_pg_cmpo = first_term + second_term
 
-      ## L_m
+      ## L_m eq. 13
       L_m = 0
-      for i in range(5):
+      for i in range(unroll_steps): # todo should check more unroll_steps = 5 numbers
         # stacked_state = torch.cat((state_traj[:, i + 1], state_traj[:, i + 2], state_traj[:, i + 3], state_traj[:, i + 4],
         #                            state_traj[:, i + 5], state_traj[:, i + 6], state_traj[:, i + 7], state_traj[:, i + 8]), dim=1)
         stacked_state = torch.cat(tuple(state_traj[:, i + j+1] for j in range(num_state_stack)), dim=1)
@@ -649,8 +651,9 @@ class Agent(nn.Module):
           a1_arr = []
           for j in range(self.action_space):
             action1_stack = []
-            for _ in t_P:
-              action1_stack.append(j)
+            action1_stack = j*np.ones(len(t_P)) # only correct when not sampling a subset
+            # for _ in t_P:
+            #   action1_stack.append(j) # wait why no arange?
             hs, r1 = target.dynamics_network(t_hs, torch.unsqueeze(torch.tensor(action1_stack), 1))
             _, v1 = target.prediction_network(hs)
 
@@ -744,10 +747,10 @@ class Agent(nn.Module):
 
     self.scheduler.step()
 
-    self.state_traj.clear()
-    self.action_traj.clear() # todo it expects this to be a single episode every time!!!
-    self.P_traj.clear()
-    self.r_traj.clear()
+    # self.state_traj.clear()
+    # self.action_traj.clear() # todo it expects this to be a single episode every time!!!
+    # self.P_traj.clear()
+    # self.r_traj.clear()
 
     # writer.add_scalars('Loss', {'L_total': L_total.mean(),
     #                             'L_pg_cmpo': L_pg_cmpo.mean(),
@@ -785,7 +788,9 @@ score_arr_handcoded = []
 num_state_stack = 2
 first_ast_nums = 10
 train_updates = 4
-start_training_epoch = 0 # todo this doesnt work since it expects one single episode everytime
+lookahead_samples = 10
+unroll_steps = 5
+start_training_epoch = 20
 ast_strs = load_worlds()
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
