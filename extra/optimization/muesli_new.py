@@ -1,4 +1,7 @@
+import functools
 import os
+import time
+
 os.environ["GPU"] = '1'
 
 import math
@@ -19,14 +22,26 @@ from extra.optimization.helpers import MAX_DIMS, ast_str_to_lin, lin_to_feats, l
 from tinygrad.codegen import search
 from tinygrad.codegen.search import bufs_from_lin, time_linearizer
 
-
+@functools.lru_cache(None)
+def get_tm_cached(ast_str, handcoded=True):
+  lin = ast_str_to_lin(ast_str)
+  rawbufs = bufs_from_lin(lin)
+  tm = time_linearizer(lin, rawbufs)
+  if handcoded:
+    lin.hand_coded_optimizations()
+    tmhc = time_linearizer(lin, rawbufs)
+    return tm, tmhc
+  return tm
 
 class State:
 
-  def __init__(self, ast_str):
-    self.ast_str = ast_str
-    self.original_lin = ast_str_to_lin(ast_str)  # debug single ast
+  def __init__(self, ast_strs, ast_num):
+    self.ast_str = ast_strs[ast_num]
+    # print('ast_str',ast_str)
+    # exit()
+    self.original_lin = ast_str_to_lin(self.ast_str)  # debug single ast
     self.tm = self.last_tm = self.base_tm = None
+    self.handcoded_tm = None
     # self.rawbufs = bufs_from_lin(self.original_lin)
     # rawbufs = bufs_from_lin(self.original_lin)
     self.lin = deepcopy(self.original_lin)
@@ -73,9 +88,14 @@ class State:
 
   def set_base_tm(self):
     if self.base_tm is None:
-      rawbufs = bufs_from_lin(self.original_lin)
-      self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+      # rawbufs = bufs_from_lin(self.original_lin)
+      # self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+      st = time.perf_counter()
+      tm,self.handcoded_tm = get_tm_cached(self.ast_str)
+      self.last_tm = self.base_tm = tm
       assert not math.isinf(self.last_tm)
+      if math.isinf(self.handcoded_tm):
+        print("HANDCODED ERROR")
     return self.base_tm
   def reward(self):
     failed = False
@@ -385,8 +405,8 @@ class Agent(nn.Module):
     -> sampling action follow policy -> next env step
     """
     # state = self.env#.reset()no reset for now
-    ast_num = np.random.choice(10)
-    self.env = State(self.ast_strs[ast_num])
+    ast_num = np.random.choice(first_ast_nums)
+    self.env = State(self.ast_strs, ast_num)
     base_tm = self.env.set_base_tm()
     state = self.env.feature()
     state_dim = len(state)
@@ -452,7 +472,10 @@ class Agent(nn.Module):
                         'lastframe': last_frame + 1
                         }, global_i)
     game_score = (base_tm - self.env.last_tm) / base_tm
-    return game_score, r, last_frame
+    # score_to_handcoded = (self.env.handcoded_tm - self.env.last_tm) / self.env.handcoded_tm
+    base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
+    print(f'score handcoded to base {base_to_handcoded:.2f}')
+    return game_score, base_to_handcoded, r, last_frame, ast_num
 
   def update_weights_mu(self, target):
     """Optimize network weights.
@@ -753,6 +776,7 @@ class Agent(nn.Module):
 
 device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 score_arr = []
+score_arr_handcoded = []
 # game_name = 'LunarLander-v2'
 # env = gym.make(game_name)
 # env = State()
@@ -761,10 +785,11 @@ score_arr = []
 # self.state_replay[sel] 12
 # len p replay 1 6
 num_state_stack = 2
+first_ast_nums = 4
 train_updates = 4
 start_training_epoch = 0 # todo this doesnt work since it expects one single episode everytime
 ast_strs = load_worlds()
-env = State(ast_strs[0])
+env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 action_space = env.action_length()
 del env
@@ -777,21 +802,30 @@ agent = Agent(observation_space[0], action_space, 128)
 
 ## initialization
 target.load_state_dict(agent.state_dict())
-
+best_ast_num_scores = [0.]*first_ast_nums
+handcoded_best_ast_num_scores = [0.]*first_ast_nums
 ## Self play & Weight update loop
 episode_nums = 4000
 for i in range(episode_nums):
   # writer = SummaryWriter(logdir='scalar/')
   global_i = i
-  game_score, last_r, frame = agent.self_play_mu()
+  game_score, base_to_handcoded, last_r, frame, ast_num = agent.self_play_mu()
+  more_than_handcoded = game_score - base_to_handcoded
+  if best_ast_num_scores[ast_num] < game_score:
+    best_ast_num_scores[ast_num] = round(game_score,3)
+  if handcoded_best_ast_num_scores[ast_num] == 0.:
+    handcoded_best_ast_num_scores[ast_num] = round(base_to_handcoded,3)
   # writer.add_scalar('score', game_score, global_i)
-  print('relative speed score', game_score, 'iteration', global_i)
-
+  print(f'relative speed score {game_score:.4f} relative % more than handcoded {more_than_handcoded:.4f} iteration {global_i}')
+  print('best scores for each ast num', best_ast_num_scores)
+  print('best handcoded scores for each ast num', handcoded_best_ast_num_scores)
 
   score_arr.append(game_score)
+  score_arr_handcoded.append(more_than_handcoded)
   if i % 10 == 0:
     mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
-    print('episode, avg, score\n', i, mean_score, game_score)
+    more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i+1]))
+    print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
 
   if i % 100 == 0:
     torch.save(agent.state_dict(), 'weights.pt')
