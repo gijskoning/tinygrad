@@ -29,12 +29,8 @@ if __name__ == "__main__":
   sched = out.lazydata.schedule(seen)
   sched = [x for x in sched if x.ast.op not in LoadOps]
 
-  if getenv("BEAM"):
-    from extra.optimization.helpers import lin_to_feats
-    from extra.optimization.pretrain_valuenet import ValueNet
-    from tinygrad.nn.state import safe_load, load_state_dict
-    net = ValueNet()
-    load_state_dict(net, safe_load("/tmp/valuenet.safetensors"))
+  # focus on one kernel
+  if getenv("KERNEL", -1) >= 0: sched = sched[getenv("KERNEL", -1):getenv("KERNEL", -1)+1]
 
   # work with the schedule
   total_tm = 0
@@ -79,25 +75,6 @@ if __name__ == "__main__":
         lin = beam[0]
         global_db[str(lin.ast)] = lin.applied_opts
       lins.append(lin)
-
-    # try a beam search in the policy model
-    if getenv("BEAM"):
-      expanded = set()
-      beam = [Linearizer(si.ast, device.linearizer_opts)]
-      timed_lins = []
-      while 1:
-        expanded_one = False
-        for lin in beam:
-          if lin in expanded: continue
-          expanded.add(lin)
-          expanded_one = True
-          acted_lins = get_linearizer_actions(lin)
-          timed_lins += [(time_linearizer(v, rawbufs)*1e3, v) for _,v in acted_lins.items()]
-        if not expanded_one: break
-        top_k = sorted(timed_lins, key=lambda x: x[0])[:getenv("BEAM")]
-        print([x[0] for x in top_k])
-        beam = [x[1] for x in top_k]
-      lins += beam
 
     # benchmark the programs
     choices = []
