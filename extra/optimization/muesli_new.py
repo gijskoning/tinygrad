@@ -472,9 +472,7 @@ class Agent(nn.Module):
                         'lastframe': last_frame + 1
                         }, global_i)
     game_score = (base_tm - self.env.last_tm) / base_tm
-    # score_to_handcoded = (self.env.handcoded_tm - self.env.last_tm) / self.env.handcoded_tm
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
-    print(f'score handcoded to base {base_to_handcoded:.2f}')
     return game_score, base_to_handcoded, r, last_frame, ast_num
 
   def update_weights_mu(self, target):
@@ -785,7 +783,7 @@ score_arr_handcoded = []
 # self.state_replay[sel] 12
 # len p replay 1 6
 num_state_stack = 2
-first_ast_nums = 4
+first_ast_nums = 10
 train_updates = 4
 start_training_epoch = 0 # todo this doesnt work since it expects one single episode everytime
 ast_strs = load_worlds()
@@ -802,8 +800,8 @@ agent = Agent(observation_space[0], action_space, 128)
 
 ## initialization
 target.load_state_dict(agent.state_dict())
-best_ast_num_scores = [0.]*first_ast_nums
-handcoded_best_ast_num_scores = [0.]*first_ast_nums
+best_ast_num_scores = np.zeros(first_ast_nums)
+handcoded_best_ast_num_scores = np.zeros(first_ast_nums)
 ## Self play & Weight update loop
 episode_nums = 4000
 for i in range(episode_nums):
@@ -812,13 +810,13 @@ for i in range(episode_nums):
   game_score, base_to_handcoded, last_r, frame, ast_num = agent.self_play_mu()
   more_than_handcoded = game_score - base_to_handcoded
   if best_ast_num_scores[ast_num] < game_score:
-    best_ast_num_scores[ast_num] = round(game_score,3)
+    best_ast_num_scores[ast_num] = game_score
   if handcoded_best_ast_num_scores[ast_num] == 0.:
-    handcoded_best_ast_num_scores[ast_num] = round(base_to_handcoded,3)
+    handcoded_best_ast_num_scores[ast_num] = base_to_handcoded
   # writer.add_scalar('score', game_score, global_i)
   print(f'relative speed score {game_score:.4f} relative % more than handcoded {more_than_handcoded:.4f} iteration {global_i}')
-  print('best scores for each ast num', best_ast_num_scores)
-  print('best handcoded scores for each ast num', handcoded_best_ast_num_scores)
+  print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
+  print('Diff with best handcoded scores for each ast num', (best_ast_num_scores-handcoded_best_ast_num_scores).round(2).tolist())
 
   score_arr.append(game_score)
   score_arr_handcoded.append(more_than_handcoded)
