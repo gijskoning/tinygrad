@@ -31,9 +31,10 @@ class Conv(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-  def __init__(self, filters):
+  def __init__(self, size):
     super().__init__()
-    self.conv = Conv(filters, filters, 3, True)
+    # self.conv = Conv(filters, filters, 3, True)
+    self.conv = nn.Linear(size, size)
 
   def forward(self, x):
     return F.relu(x + (self.conv(x)))
@@ -47,8 +48,9 @@ class Representation(nn.Module):
     self.input_shape = input_shape
     # self.board_size = self.input_shape[1] * self.input_shape[2]
 
-    self.layer0 = Conv(self.input_shape[0], num_filters, 3, bn=True)
-    self.blocks = nn.ModuleList([ResidualBlock(num_filters) for _ in range(num_blocks)])
+    # self.layer0 = Conv(self.input_shape[0], num_filters, 3, bn=True)
+    self.layer0 = nn.Linear(self.input_shape, 128)
+    self.blocks = nn.ModuleList([ResidualBlock(size=128) for _ in range(num_blocks)])
 
   def forward(self, x):
     h = F.relu(self.layer0(x))
@@ -72,29 +74,24 @@ class Prediction(nn.Module):
     # self.action_size = input_shape[0] * self.board_size
     self.action_size = action_shape
     INNER = 256
-    self.linear1_p = nn.Linear(input_shape[0], INNER)
-    self.linear2_p = nn.Linear(INNER, self.action_size)
+    self.linear1_p = nn.Linear(input_shape, INNER)
+    self.linear2_p = nn.Linear(INNER, INNER)
+    self.linear3_p = nn.Linear(INNER, self.action_size)
     # self.conv_p1 = Conv(num_filters, 4, 1, bn=True)
     # self.conv_p2 = Conv(4, 1, 1)
     #
     # self.conv_v = Conv(num_filters, 4, 1, bn=True)
     # self.fc_v = nn.Linear(self.board_size * 4, 1, bias=False)
-    self.linear1_v = nn.Linear(input_shape[0], INNER)
-    self.linear2_v = nn.Linear(INNER, 1, bias=False)
+    self.linear1_v = nn.Linear(input_shape, INNER)
+    self.linear2_v = nn.Linear(INNER, INNER)
+    self.linear3_v = nn.Linear(INNER, 1, bias=False)
 
   def forward(self, rp):
     h_p = F.relu(self.linear1_p(rp))
+    h_p = F.relu(self.linear2_p(h_p))
     # todo check if shape is okay here
-    h_p = F.relu(self.linear2_p(h_p)).view(-1, self.action_size)
-    # h_p = F.relu(self.conv_p1(rp))
-    # h_p = self.conv_p2(h_p).view(-1, self.action_size)
-    #
-    # h_v = F.relu(self.conv_v(rp))
-    # h_v = self.fc_v(h_v.view(-1, self.board_size * 4))
-    h_v = F.relu(self.linear1_v(rp))
-    h_v = self.linear2_v(h_v)
-    # range of value is -1 ~ 1
-    return F.softmax(h_p, dim=-1), torch.tanh(h_v)
+    h_p = F.relu(self.linear3_p(h_p)).view(-1, self.action_size)
+    return F.softmax(h_p, dim=-1), self.value(rp)
 
   def inference(self, rp):
     self.eval()
@@ -115,8 +112,10 @@ class Dynamics(nn.Module):
   def __init__(self, rp_shape, act_shape):
     super().__init__()
     self.rp_shape = rp_shape
-    self.layer0 = Conv(rp_shape[0] + act_shape[0], num_filters, 3, bn=True)
-    self.blocks = nn.ModuleList([ResidualBlock(num_filters) for _ in range(num_blocks)])
+    # self.layer0 = Conv(rp_shape[0] + act_shape[0], num_filters, 3, bn=True)
+    self.layer0 = nn.Linear(rp_shape + act_shape, 128)
+    # self.blocks = nn.ModuleList([ResidualBlock(num_filters) for _ in range(num_blocks)])
+    self.blocks = nn.ModuleList([ResidualBlock(128) for _ in range(num_blocks)])
 
   def forward(self, rp, a):
     h = torch.cat([rp, a], dim=1)
@@ -138,13 +137,13 @@ class Net(nn.Module):
   def __init__(self):
     super().__init__()
     # input_shape = State.feature_shape()
-    action_input_shape = State.action_feature()
+    input_shape = State.feature_shape()[0]
     action_output_shape = State.action_length()
     # rp_shape = (num_filters, *input_shape[1:]) # for now no dynamics
-
-    # self.representation = Representation(input_shape) # todo skip for now
-    self.prediction = Prediction(action_input_shape, action_output_shape)
-    # self.dynamics = Dynamics(rp_shape, action_shape)
+    inner_state_size = 128
+    self.representation = Representation(input_shape)
+    self.prediction = Prediction(inner_state_size, action_output_shape)
+    self.dynamics = Dynamics(inner_state_size, action_output_shape)
 
   def predict(self, state0, path):
     '''Predict p and v from original state and path'''

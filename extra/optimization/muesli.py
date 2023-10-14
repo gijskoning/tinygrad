@@ -80,14 +80,19 @@ def train(episodes, net:Net, optimizer):
 
     # Compute losses for k (+ current) steps
     ps, vs = [], []
-    # rp = net.representation(x)
-    rp = x # no representation for now
+    rp = net.representation(x)
     for t in range(same_episode_length_K + 1):
       p, v = net.prediction(rp)
       ps.append(p)
       vs.append(v)
-      # rp = net.dynamics(rp, ax[:, t])
-      rp = torch.tensor([s[t].feature() for s in states])
+      rp = net.dynamics(rp, ax[:, t])
+    # rp = x # no representation for now
+    # for t in range(same_episode_length_K + 1):
+    #   p, v = net.prediction(rp)
+    #   ps.append(p)
+    #   vs.append(v)
+    #   rp = net.dynamics(rp, ax[:, t])
+    #   # rp = torch.tensor([s[t].step().feature() for s in states])
 
     cmpo_loss, v_loss = 0, 0
     for t in range(same_episode_length_K, -1, -1): # todo bit weird?? is just [1,0]
@@ -104,13 +109,13 @@ def train(episodes, net:Net, optimizer):
     v_loss_sum += v_loss.item() / (same_episode_length_K + 1)
 
     optimizer.zero_grad()
-    print(f'pg_loss,cmpo_loss,v_loss {pg_loss.item()/batch_size:.2f},{cmpo_loss.item()/batch_size:.2f},{v_loss.item()/batch_size:.2f}')
+    # print(f'pg_loss,cmpo_loss,v_loss {pg_loss.item()/batch_size:.2f},{cmpo_loss.item()/batch_size:.2f},{v_loss.item()/batch_size:.2f}')
     assert math.isfinite(pg_loss + cmpo_loss + v_loss), f'nan pg_loss,cmpo_loss,v_loss {pg_loss.item(),cmpo_loss.item(),v_loss.item()}'
     (pg_loss + cmpo_loss + v_loss).backward()
     optimizer.step()
 
   data_count = training_steps * batch_size
-  print('pg_loss %f cmpo_loss %f v_loss %f' % (pg_loss_sum / data_count, cmpo_loss_sum / data_count, v_loss_sum / data_count))
+  print(f'pg_loss {pg_loss_sum / data_count:.2f} cmpo_loss {cmpo_loss_sum / data_count:.2f} v_loss {v_loss_sum / data_count:.2f}')
   return net
 
 
@@ -121,9 +126,9 @@ if __name__ == "__main__":
   num_epochs = 100
   start_train_epoch = 0
   episodes_per_training_step = 1
-  same_episode_length_K = 1
+  same_episode_length_K = 3
   C = 1
-  num_sampled_actions = 3
+  num_sampled_actions = 3#5
   simulation_depth = 1
   # DENSE_REWARD = True
   # net = PolicyNet()
@@ -143,7 +148,7 @@ if __name__ == "__main__":
 
   for epoch in range(num_epochs):
     net.eval()
-    ast_num = epoch%1
+    ast_num = epoch%10
     print('astnum', ast_num)
     state = State(ast_strs[ast_num])
     # state = State(ast_strs[0])
@@ -161,8 +166,8 @@ if __name__ == "__main__":
         states.append(state)
         # probs = net(Tensor([feat])).exp()[0].numpy()
 
-        # rp_root = net.representation.inference(feat)
-        rp_root = feat # no representation for now
+        rp_root = net.representation.inference(np.asarray(feat, dtype=np.float32))
+        # rp_root = feat # no representation for now
         p_root, v_root = net.prediction.inference(np.asarray(rp_root))
         # p_root = state.get_masked_probs(p_root)
         # print('p_root', p_root, p_root.sum())
@@ -181,6 +186,12 @@ if __name__ == "__main__":
           act = root_act
           failed = False
           for t in range(simulation_depth):
+            # old way
+            # action_feature = state.action_feature(action)
+            # rp = net.dynamics.inference(rp, action_feature)
+            # p, v = net.prediction.inference(rp)
+            # qs.append(-v if t % 2 == 0 else v)
+            # action = np.random.choice(np.arange(len(p)), p=p)
             if plan_state.terminal:
               break
             try:
@@ -191,8 +202,8 @@ if __name__ == "__main__":
               failed = True
               break
             action_feature = plan_state.feature() # todo currently state feature
-            # rp = net.dynamics.inference(rp, action_feature) # todo we could just replace with real model here?
-            rp = action_feature  # todo currently regular feature is used for action feature
+            rp = net.dynamics.inference(rp, np.asarray(action_feature, dtype=np.float32)) # todo we could just replace with real model here?
+            # rp = action_feature  # todo currently regular feature is used for action feature
             p, v = net.prediction.inference(np.asarray(rp))
             qs.append(v)
             if act == 0: # final action
@@ -224,7 +235,6 @@ if __name__ == "__main__":
         # selected_action_features.append(state.action_feature(selected_action))
         selected_action_features.append(state.feature()) # todo currently the action feature is simply the next state
         # print('State step', state.steps)
-      # state.play(selected_action)
       # print("steps taken", state.steps)
       # print(f"Final ast {ast_num} color", state.lin.colors())
       # print(f"prediction reward {net.prediction.value(torch.tensor(features[-1]).float()).cpu().item():.2f}", )
@@ -239,7 +249,7 @@ if __name__ == "__main__":
       print(f'*** episode reward {reward:.5f} mean last 10 episodes {np.mean([e["reward"] for e in episodes[-10:]]):.3f}')
 
     # Training of neural net
-    if (epoch) % episodes_per_training_step == 0 and epoch > start_train_epoch:
+    if (epoch) % episodes_per_training_step == 0 and epoch >= start_train_epoch:
       print("train")
       net = train(episodes, net, optimizer)
       print("done train")
