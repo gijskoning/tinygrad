@@ -2,6 +2,8 @@ import functools
 import os
 import time
 
+from torch.utils.tensorboard import SummaryWriter
+
 os.environ["GPU"] = '1'
 
 import math
@@ -371,14 +373,9 @@ class Agent(nn.Module):
     self.representation_network = Representation(state_dim * num_state_stack, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
-    self.optimizer = torch.optim.AdamW(self.parameters(), lr=0.00032, weight_decay=0)
-    self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=4000, end_learning_rate=0.0000)
+    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
+    self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=episode_nums, end_learning_rate=0.0000)
     self.to(device)
-
-    # self.state_traj = []
-    # self.action_traj = []
-    # self.P_traj = []
-    # self.r_traj = []
 
     self.state_replay = []
     self.action_replay = []
@@ -393,8 +390,8 @@ class Agent(nn.Module):
     self.var = 0
     self.beta_product = 1.0
 
-    self.var_m = [0 for _ in range(5)]
-    self.beta_product_m = [1.0 for _ in range(5)]
+    self.var_m = [0 for _ in range(unroll_steps)]
+    self.beta_product_m = [1.0 for _ in range(unroll_steps)]
 
   def self_play_mu(self, max_timestep=10000):
     """Self-play and save trajectory to replay buffer
@@ -413,12 +410,15 @@ class Agent(nn.Module):
     state_traj, action_traj, P_traj, r_traj = [], [], [], []
     for i in range(max_timestep):
       start_state = state
-      if i == 0:
-        # stacked_state = np.concatenate((state, state, state, state, state, state, state, state), axis=0)
-        stacked_state = np.concatenate(tuple(state for _ in range(num_state_stack)), axis=0) # for now just stack 2
+      if num_state_stack == 1:
+        stacked_state = state
       else:
-        stacked_state = np.roll(stacked_state, -state_dim, axis=0)
-        stacked_state[-state_dim:] = state
+        if i == 0:
+          # stacked_state = np.concatenate((state, state, state, state, state, state, state, state), axis=0)
+          stacked_state = np.concatenate(tuple(state for _ in range(num_state_stack)), axis=0) # for now just stack 2
+        else:
+          stacked_state = np.roll(stacked_state, -state_dim, axis=0)
+          stacked_state[-state_dim:] = state
 
       with torch.no_grad():
         hs = self.representation_network(torch.from_numpy(stacked_state).float().to(device))
@@ -451,10 +451,10 @@ class Agent(nn.Module):
     # print('self_play: score, r, done, info, lastframe', int(game_score), r, done, info, i)
 
     # for update inference over trajectory length
-    for _ in range(5):
+    for _ in range(unroll_steps):
       state_traj.append(np.zeros_like(state))
 
-    for _ in range(6):
+    for _ in range(unroll_steps+1):
       r_traj.append(0.0)
       action_traj.append(-1)
 
@@ -464,10 +464,10 @@ class Agent(nn.Module):
     self.P_replay.append(P_traj)
     self.r_replay.append(r_traj)
 
-    # writer.add_scalars('Selfplay',
-    #                    {'lastreward': r,
-    #                     'lastframe': last_frame + 1
-    #                     }, global_i)
+    writer.add_scalars('Selfplay',
+                       {'lastreward': r,
+                        'lastframe': last_frame + 1
+                        }, global_i)
     print('Selfplay',
                        {'lastreward': r,
                         'lastframe': last_frame + 1
@@ -480,8 +480,8 @@ class Agent(nn.Module):
     """Optimize network weights.
 
     Iteration: 20
-    Mini-batch size: 16 (4 replay, 4 seqeuences in 1 replay)
-    Replay: Uniform replay without on-policy data
+    Mini-batch size: 16 (4 replay, 4 sequences in 1 replay)
+    Replay: Uniform replay with on-policy data
     Discount: 0.997
     Unroll: 5 step
     L_m: 5 step(Muesli)
@@ -489,7 +489,6 @@ class Agent(nn.Module):
     regularizer_multiplier: 5
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
-
     print("update_weights_mu")
     for _ in range(train_updates):
       state_traj = []
@@ -498,9 +497,9 @@ class Agent(nn.Module):
       r_traj = []
       G_arr_mb = []
 
-      for epi_sel in range(4):
-        if (epi_sel > -1):  ## replay proportion
-          sel = np.random.randint(0, len(self.state_replay))
+      for epi_sel in range(num_replays): # this is q
+        if (epi_sel > 0):  ## replay proportion
+          sel = np.random.randint(0, max(1,len(self.state_replay)-1))
         else:
           sel = -1
 
@@ -511,13 +510,11 @@ class Agent(nn.Module):
           G = 0.997 * G + r
           G_arr.append(G)
         G_arr.reverse()
-        for i in np.random.randint(len(self.state_replay[sel]) - 5 - (num_state_stack - 1), size=4):
-        # for i in np.random.randint(len(self.state_replay[sel]) - 5 - 7, size=4):
-        #   state_traj.append(self.state_replay[sel][i:i + 13])
-          state_traj.append(self.state_replay[sel][i:i + 5 + num_state_stack])
-          action_traj.append(self.action_replay[sel][i:i + 5])
-          r_traj.append(self.r_replay[sel][i:i + 5])
-          G_arr_mb.append(G_arr[i:i + 6])
+        for i in np.random.randint(len(self.state_replay[sel]) - unroll_steps - (num_state_stack - 1), size=seq_in_replay):
+          state_traj.append(self.state_replay[sel][i:i + unroll_steps + num_state_stack])
+          action_traj.append(self.action_replay[sel][i:i + unroll_steps])
+          r_traj.append(self.r_replay[sel][i:i + unroll_steps])
+          G_arr_mb.append(G_arr[i:i + unroll_steps + 1])
           P_traj.append(self.P_replay[sel][i])
 
       state_traj = torch.from_numpy(np.array(state_traj)).to(device)
@@ -527,16 +524,14 @@ class Agent(nn.Module):
       r_traj = torch.from_numpy(np.array(r_traj)).unsqueeze(2).float().to(device)
       inferenced_P_arr = []
 
-      ## stacking 8 frame
-      # stacked_state_0 = torch.cat((state_traj[:, 0], state_traj[:, 1], state_traj[:, 2], state_traj[:, 3],
-      #                              state_traj[:, 4], state_traj[:, 5], state_traj[:, 6], state_traj[:, 7]), dim=1)
+      ## stacking
       stacked_state_0 = torch.cat(tuple(state_traj[:, i] for i in range(num_state_stack)), dim=1)
 
       ## agent network inference (5 step unroll)
       hs_s = []
       v_logits_s = []
       r_logits_s = []
-      for i in range(6):
+      for i in range(1+unroll_steps):
         if i == 0:
           hs = self.representation_network(stacked_state_0)
         else:
@@ -580,7 +575,7 @@ class Agent(nn.Module):
 
         ## normalized advantage
       beta_var = 0.99
-      self.var = beta_var * self.var + (1 - beta_var) * (torch.sum((G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) ** 2) / 16)
+      self.var = beta_var * self.var + (1 - beta_var) * (torch.sum((G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) ** 2) / minibatch_size)
       self.beta_product *= beta_var
       var_hat = self.var / (1 - self.beta_product)
       under = torch.sqrt(var_hat + 1e-12)
@@ -623,7 +618,6 @@ class Agent(nn.Module):
       second_term = 0
       for k in range(lookahead_samples):
         second_term += exp_clip_adv_arr[k] / z_cmpo_arr[k] * torch.log(first_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device)))
-      regularizer_multiplier = 5
       second_term *= -1 * regularizer_multiplier / lookahead_samples
 
       ## L_pg_cmpo
@@ -632,15 +626,13 @@ class Agent(nn.Module):
       ## L_m eq. 13
       L_m = 0
       for i in range(unroll_steps): # todo should check more unroll_steps = 5 numbers
-        # stacked_state = torch.cat((state_traj[:, i + 1], state_traj[:, i + 2], state_traj[:, i + 3], state_traj[:, i + 4],
-        #                            state_traj[:, i + 5], state_traj[:, i + 6], state_traj[:, i + 7], state_traj[:, i + 8]), dim=1)
         stacked_state = torch.cat(tuple(state_traj[:, i + j+1] for j in range(num_state_stack)), dim=1)
         with torch.no_grad():
           t_hs = target.representation_network(stacked_state)
           t_P, t_v_logits = target.prediction_network(t_hs)
 
         beta_var = 0.99
-        self.var_m[i] = beta_var * self.var_m[i] + (1 - beta_var) * (torch.sum((G_arr_mb[:, i + 1] - to_scalar(t_v_logits)) ** 2) / 16)
+        self.var_m[i] = beta_var * self.var_m[i] + (1 - beta_var) * (torch.sum((G_arr_mb[:, i + 1] - to_scalar(t_v_logits)) ** 2) / minibatch_size)
         self.beta_product_m[i] *= beta_var
         var_hat = self.var_m[i] / (1 - self.beta_product_m[i])
         under = torch.sqrt(var_hat + 1e-12)
@@ -650,8 +642,7 @@ class Agent(nn.Module):
           v1_arr = []
           a1_arr = []
           for j in range(self.action_space):
-            action1_stack = []
-            action1_stack = j*np.ones(len(t_P)) # only correct when not sampling a subset
+            action1_stack = j*np.ones(len(t_P), dtype=np.int64) # only correct when not sampling a subset
             # for _ in t_P:
             #   action1_stack.append(j) # wait why no arange?
             hs, r1 = target.dynamics_network(t_hs, torch.unsqueeze(torch.tensor(action1_stack), 1))
@@ -667,8 +658,7 @@ class Agent(nn.Module):
           exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
 
         ## Paper appendix F.2 : Prior policy
-        # t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * torch.tensor([[0.25, 0.25, 0.25, 0.25] for _ in range(16)]).to(device)
-        t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((16,self.env.action_length()))/self.env.action_length()).to(device)
+        t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((minibatch_size,self.env.action_length()))/self.env.action_length()).to(device)
 
         pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
                         * exp_clip_adv_arr[k])
@@ -679,55 +669,24 @@ class Agent(nn.Module):
         kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
         L_m += kl_loss(torch.log(inferenced_P_arr[i + 1]), pi_cmpo_all)
 
-      L_m /= 5
+      L_m /= unroll_steps
 
       ## L_v
       ls = nn.LogSoftmax(dim=-1)
-
-      # L_v = -1 * (
-      #   (to_cr(G_arr_mb[:, 0]) * ls(first_v_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(G_arr_mb[:, 1]) * ls(second_v_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(G_arr_mb[:, 2]) * ls(third_v_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(G_arr_mb[:, 3]) * ls(fourth_v_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(G_arr_mb[:, 4]) * ls(fifth_v_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(G_arr_mb[:, 5]) * ls(sixth_v_logits)).sum(-1, keepdim=True)
-      # )
-      L_v = -1 * (
-        (to_cr(G_arr_mb[:, 0]) * ls(v_logits_s[0])).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 1]) * ls(v_logits_s[1])).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 2]) * ls(v_logits_s[2])).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 3]) * ls(v_logits_s[3])).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 4]) * ls(v_logits_s[4])).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 5]) * ls(v_logits_s[5])).sum(-1, keepdim=True)
-      )
+      L_v = 0
+      for i in range(unroll_steps + 1): L_v += (to_cr(G_arr_mb[:, i]) * ls(v_logits_s[i])).sum(-1, keepdim=True)
+      L_v = -1 * L_v
       ## L_r
-      L_r = -1 * (
-        (to_cr(r_traj[:, 0]) * ls(r_logits_s[0])).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 1]) * ls(r_logits_s[1])).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 2]) * ls(r_logits_s[2])).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 3]) * ls(r_logits_s[3])).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 4]) * ls(r_logits_s[4])).sum(-1, keepdim=True)
-      )
-      # L_r = -1 * (
-      #   (to_cr(r_traj[:, 0]) * ls(r_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(r_traj[:, 1]) * ls(r2_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(r_traj[:, 2]) * ls(r3_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(r_traj[:, 3]) * ls(r4_logits)).sum(-1, keepdim=True)
-      #   + (to_cr(r_traj[:, 4]) * ls(r5_logits)).sum(-1, keepdim=True)
-      # )
-
+      L_r = 0.
+      for i in range(unroll_steps): L_r += (to_cr(r_traj[:, i]) * ls(r_logits_s[i])).sum(-1, keepdim=True)
+      L_r = -1 * L_r
       ## start of dynamics network gradient *0.5
-      for i in range(6): hs_s[i].register_hook(lambda grad: grad * 0.5)
-      # first_hs.register_hook(lambda grad: grad * 0.5)
-      # second_hs.register_hook(lambda grad: grad * 0.5)
-      # third_hs.register_hook(lambda grad: grad * 0.5)
-      # fourth_hs.register_hook(lambda grad: grad * 0.5)
-      # fifth_hs.register_hook(lambda grad: grad * 0.5)
-      # sixth_hs.register_hook(lambda grad: grad * 0.5)
+      for i in range(unroll_steps+1): hs_s[i].register_hook(lambda grad: grad * 0.5)
 
       ## total loss
-      L_total = L_pg_cmpo + L_v / 6 / 4 + L_r / 5 / 1 + L_m
-
+      # todo not sure if 4 belongs to seq_in_replay,  or  num_replays
+      L_total = L_pg_cmpo + L_v / (unroll_steps+1) / 4 + L_r / unroll_steps / 1 + L_m # todo check if unroll_steps is good here
+      # todo divided by 1?
       ## optimize
       self.optimizer.zero_grad()
       L_total.mean().backward()
@@ -735,8 +694,6 @@ class Agent(nn.Module):
       self.optimizer.step()
 
       ## target network(prior parameters) moving average update
-      # alpha_target = 0.01
-      alpha_target = 0.05
       params1 = self.named_parameters()
       params2 = target.named_parameters()
       dict_params2 = dict(params2)
@@ -747,57 +704,55 @@ class Agent(nn.Module):
 
     self.scheduler.step()
 
-    # self.state_traj.clear()
-    # self.action_traj.clear() # todo it expects this to be a single episode every time!!!
-    # self.P_traj.clear()
-    # self.r_traj.clear()
-
-    # writer.add_scalars('Loss', {'L_total': L_total.mean(),
+    writer.add_scalars('Loss', {'L_total': L_total.mean(),
+                                'L_pg_cmpo': L_pg_cmpo.mean(),
+                                'L_v': (L_v / (unroll_steps+1) / 4).mean(),
+                                'L_r': (L_r / unroll_steps / 1).mean(),
+                                'L_m': (L_m).mean()
+                                }, global_i)
+    #
+    writer.add_scalars('vars', {'self.var': self.var,
+                                'self.var_m': self.var_m[0]
+                                }, global_i)
+    # print('Loss', {'L_total': L_total.mean(),
     #                             'L_pg_cmpo': L_pg_cmpo.mean(),
     #                             'L_v': (L_v / 6 / 4).mean(),
     #                             'L_r': (L_r / 5 / 1).mean(),
     #                             'L_m': (L_m).mean()
     #                             }, global_i)
     #
-    # writer.add_scalars('vars', {'self.var': self.var,
+    # print('vars', {'self.var': self.var,
     #                             'self.var_m': self.var_m[0]
     #                             }, global_i)
-    print('Loss', {'L_total': L_total.mean(),
-                                'L_pg_cmpo': L_pg_cmpo.mean(),
-                                'L_v': (L_v / 6 / 4).mean(),
-                                'L_r': (L_r / 5 / 1).mean(),
-                                'L_m': (L_m).mean()
-                                }, global_i)
-
-    print('vars', {'self.var': self.var,
-                                'self.var_m': self.var_m[0]
-                                }, global_i)
 
     return
 
 device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 score_arr = []
 score_arr_handcoded = []
-# game_name = 'LunarLander-v2'
-# env = gym.make(game_name)
-# env = State()
-# self.state_replay[sel] 30
-# len p replay 2 18
-# self.state_replay[sel] 12
-# len p replay 1 6
-num_state_stack = 2
-first_ast_nums = 10
-train_updates = 4
-lookahead_samples = 10
-unroll_steps = 5
-start_training_epoch = 20
+
+num_replays = 32
+seq_in_replay = 4
+minibatch_size = num_replays * seq_in_replay
+num_state_stack = 1
+first_ast_nums = 50
+train_updates = 5
+alpha_target = 0.05 # 5% new to target
+
+regularizer_multiplier = 1 # was 5 but that seems very high
+
+lookahead_samples = 20
+unroll_steps = 3 # todo cannot be changed at the moment
+start_training_epoch = 0
 ast_strs = load_worlds()
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 action_space = env.action_length()
+episode_nums = 10000
+exp_str = '2' # 1,
 del env
-target = Target(observation_space[0], action_space, 128)
-agent = Agent(observation_space[0], action_space, 128)
+target = Target(observation_space[0], action_space, 256)
+agent = Agent(observation_space[0], action_space, 256)
 # target = Target(env.observation_space.shape[0], env.action_space.n, 128)
 # agent = Agent(env.observation_space.shape[0], env.action_space.n, 128)
 # print(agent)
@@ -808,9 +763,8 @@ target.load_state_dict(agent.state_dict())
 best_ast_num_scores = np.zeros(first_ast_nums)
 handcoded_best_ast_num_scores = np.zeros(first_ast_nums)
 ## Self play & Weight update loop
-episode_nums = 4000
 for i in range(episode_nums):
-  # writer = SummaryWriter(logdir='scalar/')
+  writer = SummaryWriter(log_dir=f'scalar{exp_str}/')
   global_i = i
   game_score, base_to_handcoded, last_r, frame, ast_num = agent.self_play_mu()
   more_than_handcoded = game_score - base_to_handcoded
@@ -818,10 +772,15 @@ for i in range(episode_nums):
     best_ast_num_scores[ast_num] = game_score
   if handcoded_best_ast_num_scores[ast_num] == 0.:
     handcoded_best_ast_num_scores[ast_num] = base_to_handcoded
-  # writer.add_scalar('score', game_score, global_i)
+
   print(f'relative speed score {game_score:.4f} relative % more than handcoded {more_than_handcoded:.4f} iteration {global_i}')
   print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
-  print('Diff with best handcoded scores for each ast num', (best_ast_num_scores-handcoded_best_ast_num_scores).round(2).tolist())
+  diff_best_handcoded = best_ast_num_scores - handcoded_best_ast_num_scores
+  print('Diff with best handcoded scores for each ast num', (diff_best_handcoded).round(2).tolist())
+  print('mean diff', diff_best_handcoded.mean().round(2).tolist())
+  writer.add_scalar('relative_to_base_score', game_score, global_i)
+  writer.add_scalar('more_than_handcoded', more_than_handcoded, global_i)
+  writer.add_scalar('diff_to_best_handcoded', diff_best_handcoded.mean(), global_i)
 
   score_arr.append(game_score)
   score_arr_handcoded.append(more_than_handcoded)
@@ -829,12 +788,11 @@ for i in range(episode_nums):
     mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
     more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i+1]))
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
-
   if i % 100 == 0:
-    torch.save(agent.state_dict(), 'weights.pt')
+    torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
 
   if mean_score > 250 and np.mean(np.array(score_arr[-5:])) > 250:
-    torch.save(agent.state_dict(), 'weights.pt')
+    torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
     print('Done')
     break
   if i >= start_training_epoch:
@@ -842,5 +800,5 @@ for i in range(episode_nums):
     print("Done update")
   # writer.close()
 
-torch.save(agent.state_dict(), 'weights.pt')
+torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
 agent.env.close()
