@@ -35,8 +35,9 @@ class State:
     self.terminal = False
     self._feature = None
     self.failed = False
+    self._reward = None
 
-  def step(self, act) -> Tuple['State', np.ndarray,float,bool, None]:
+  def step(self, act, dense_reward=True) -> Tuple['State', np.ndarray,float,bool, None]:
     # assert isinstance(act, int), f'act must be int, got {act, type(act)}'
     state = deepcopy(self)
     state._feature = None
@@ -53,46 +54,52 @@ class State:
       state.failed, r = state.reward()
       return state, state.feature(), r, state.terminal, info
     state.lin.apply_opt(search.actions[act - 1])
-    state.tm = None
+    state._reward = None
 
     # state.state_lin =
     # return state
-    state.failed, r = state.reward()
+    if dense_reward:
+      state.failed, r = state.reward()
+    else:
+      state.failed, r = False, 0.
     state.terminal = state.terminal and not state.failed
     return state, state.feature(), r, state.terminal, info
 
   def _step(self, act):
     state = deepcopy(self)
     state.lin.apply_opt(search.actions[act - 1])
-    state.tm = None
+    state._reward = None
     return state
 
   def set_base_tm(self):
     if self.base_tm is None:
       rawbufs = bufs_from_lin(self.original_lin)
-      self.tm = self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
-      assert not math.isinf(self.tm)
+      self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+      assert not math.isinf(self.last_tm)
     return self.base_tm
   def reward(self):
     failed = False
     try:
       rawbufs = bufs_from_lin(self.original_lin)
       if self.base_tm is None:
-        self.base_tm = time_linearizer(self.original_lin, rawbufs)
+        self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
         assert not math.isinf(self.tm)
-      if self.tm is None:
-        self.tm = time_linearizer(self.original_lin, rawbufs)
-        assert not math.isinf(self.tm)
+      if self._reward is None:
+        tm = time_linearizer(self.lin, rawbufs)
+        assert not math.isinf(tm)
+        self._reward = (self.last_tm - tm)
+        self.last_tm = tm
+
       # time_penalty = ((self.last_tm - tm) / self.base_tm)
       # reward = ((self.last_tm - tm) / self.base_tm)
-      reward = (self.last_tm - self.tm)
-      self.last_tm = self.tm
+      # reward = (self.last_tm - self.tm)
+      # self.last_tm = self.tm
     except AssertionError as e:
       # print(e)
-      reward = -self.base_tm
+      self._reward = -self.base_tm
       failed = True
 
-    return failed, reward # scale reward a bit
+    return failed, self._reward
 
   def feature(self):
 
@@ -270,6 +277,7 @@ class Prediction(nn.Module):
     P = self.policy_head(x)
     P = torch.nn.functional.softmax(P, dim=-1)
     V = self.value_head(x)
+    # print('V', V.cpu().detach().numpy())
     return P, V
 
 
@@ -397,7 +405,7 @@ class Agent(nn.Module):
       probs = P.detach().cpu().numpy()
       action = self.env.get_valid_action(probs)
       # action = np.random.choice(np.arange(self.action_space), p=P.detach().cpu().numpy())
-      self.env, state, r, done, info = self.env.step(action) # todo fix self.env
+      self.env, state, r, done, info = self.env.step(action, dense_reward=True) # todo fix self.env
       if i == 0:
         for _ in range(num_state_stack):
           self.state_traj.append(start_state)
@@ -716,7 +724,7 @@ class Agent(nn.Module):
     self.scheduler.step()
 
     self.state_traj.clear()
-    self.action_traj.clear()
+    self.action_traj.clear() # todo it expects this to be a single episode every time!!!
     self.P_traj.clear()
     self.r_traj.clear()
 
@@ -748,13 +756,18 @@ score_arr = []
 # game_name = 'LunarLander-v2'
 # env = gym.make(game_name)
 # env = State()
+# self.state_replay[sel] 30
+# len p replay 2 18
+# self.state_replay[sel] 12
+# len p replay 1 6
 num_state_stack = 2
-train_updates = 5
-start_training_epoch = 0 # todo somehow increasing this doesnt work
+train_updates = 4
+start_training_epoch = 0 # todo this doesnt work since it expects one single episode everytime
 ast_strs = load_worlds()
 env = State(ast_strs[0])
 observation_space = env.feature_shape()
 action_space = env.action_length()
+del env
 target = Target(observation_space[0], action_space, 128)
 agent = Agent(observation_space[0], action_space, 128)
 # target = Target(env.observation_space.shape[0], env.action_space.n, 128)
@@ -772,7 +785,7 @@ for i in range(episode_nums):
   global_i = i
   game_score, last_r, frame = agent.self_play_mu()
   # writer.add_scalar('score', game_score, global_i)
-  print('score', game_score, 'iteration', global_i)
+  print('relative speed score', game_score, 'iteration', global_i)
 
 
   score_arr.append(game_score)
@@ -789,6 +802,7 @@ for i in range(episode_nums):
     break
   if i >= start_training_epoch:
     agent.update_weights_mu(target)
+    print("Done update")
   # writer.close()
 
 torch.save(agent.state_dict(), 'weights.pt')
