@@ -1,13 +1,151 @@
+import os
+os.environ["GPU"] = '1'
+
+import math
+from copy import deepcopy
+from typing import Tuple
+# import matplotlib.pyplot as plt
+import numpy as np
+np.seterr(all='raise')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import numpy as np
+# from torch.utils.tensorboard import SummaryWriter
 # adapted from https://github.com/Itomigna2/Muesli-lunarlander/blob/main/Muesli_LunarLander.ipynb
-#! pip install git+https://github.com/cmpark0126/pytorch-polynomial-lr-decay.git
+# ! pip install git+https://github.com/cmpark0126/pytorch-polynomial-lr-decay.git
 from torch_poly_lr_decay import PolynomialLRDecay
 
-num_stack = 2
+from extra.optimization.helpers import MAX_DIMS, ast_str_to_lin, lin_to_feats, load_worlds
+from tinygrad.codegen import search
+from tinygrad.codegen.search import bufs_from_lin, time_linearizer
+
+
+
+class State:
+
+  def __init__(self, ast_str):
+    self.ast_str = ast_str
+    self.original_lin = ast_str_to_lin(ast_str)  # debug single ast
+    self.tm = self.last_tm = self.base_tm = None
+    # self.rawbufs = bufs_from_lin(self.original_lin)
+    # rawbufs = bufs_from_lin(self.original_lin)
+    self.lin = deepcopy(self.original_lin)
+    # print(self.state_lin)
+    self.steps = 0
+    self.terminal = False
+    self._feature = None
+    self.failed = False
+
+  def step(self, act) -> Tuple['State', np.ndarray,float,bool, None]:
+    # assert isinstance(act, int), f'act must be int, got {act, type(act)}'
+    state = deepcopy(self)
+    state._feature = None
+    # state = State(ast_str=self.ast_str)
+    # state.steps = self.steps
+    # state.rawbufs = self.rawbufs
+    # state.state_lin = deepcopy(self.state_lin)
+    # state.tm,state.last_tm,state.base_tm = self.tm,self.last_tm,self.base_tm
+
+    state.steps += 1
+    state.terminal = state.steps == MAX_DIMS - 1 or act == 0
+    info = None
+    if state.terminal:
+      state.failed, r = state.reward()
+      state.terminal = state.terminal and not state.failed
+      return state, state.feature(), r, state.terminal, info
+    state.lin.apply_opt(search.actions[act - 1])
+    # state.state_lin =
+    # return state
+    state.failed, r = state.reward()
+    state.terminal = state.terminal and not state.failed
+    return state, state.feature(), r, state.terminal, info
+
+  def _step(self, act):
+    state = deepcopy(self)
+    state.lin.apply_opt(search.actions[act - 1])
+    return state
+
+  def set_base_tm(self):
+    if self.base_tm is None:
+      rawbufs = bufs_from_lin(self.original_lin)
+      self.tm = self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+      assert not math.isinf(self.tm)
+    return self.base_tm
+  def reward(self):
+    failed = False
+    try:
+      rawbufs = bufs_from_lin(self.original_lin)
+      if self.base_tm is None:
+        self.tm = self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+        assert not math.isinf(self.tm)
+      tm = time_linearizer(self.lin, rawbufs)
+      assert not math.isinf(tm)
+      # time_penalty = ((self.last_tm - tm) / self.base_tm)
+      # reward = ((self.last_tm - tm) / self.base_tm)
+      reward = (self.last_tm - tm)
+      self.last_tm = tm
+    except AssertionError as e:
+      # print(e)
+      reward = -self.base_tm
+      failed = True
+
+    return failed, reward # scale reward a bit
+
+  def feature(self):
+
+    # if self._feature is None:
+    #   self._feature = lin_to_feats(self.lin)
+    return np.asarray(lin_to_feats(self.lin)).astype(np.float32)
+
+  @staticmethod
+  def feature_shape():
+    return (1021,)
+
+  # @staticmethod
+  # def action_feature():
+  #   return (1021,)
+
+  @staticmethod
+  def action_length():
+    return len(search.actions) + 1
+
+  # def get_masked_probs(self, p_root):
+  #   # mask valid actions
+  #   # probs = net(Tensor([feat])).exp()[0].numpy()
+  #   valid_action_mask = np.zeros(self.action_length(), dtype=np.float32)
+  #   for x in get_linearizer_actions(self.lin): valid_action_mask[x] = 1
+  #   p_root *= valid_action_mask
+  #   p_root /= sum(p_root)
+  #   return p_root
+
+  def get_valid_action(self, probs):
+    probs = deepcopy(probs)
+
+    for j in range(len(probs)):
+      act = np.random.choice(len(probs), p=probs)
+      if act == 0:
+        return act
+      try:
+        lin = self._step(act).lin
+        up, lcl = 1, 1
+        try:
+          for s, c in zip(lin.full_shape, lin.colors()):
+            if c in {"magenta", "yellow"}: up *= s
+            if c in {"cyan", "green", "white"}: lcl *= s
+          if up <= 256 and lcl <= 256:
+            return act
+        except AssertionError as e:
+          pass
+          # print("exception at color", e)
+      except AssertionError as e:
+        pass
+        # print("exception at step", e)
+
+      probs[act] = 0
+      _sum = probs.sum()
+      assert _sum > 0., f'{j, len(probs)}'
+      probs = probs / _sum
+
 class Representation(nn.Module):
   """Representation Network
 
@@ -187,7 +325,7 @@ class Target(nn.Module):
 
   def __init__(self, state_dim, action_dim, width):
     super().__init__()
-    self.representation_network = Representation(state_dim * 8, state_dim * 4, width)
+    self.representation_network = Representation(state_dim * num_state_stack, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
     self.to(device)
@@ -199,7 +337,7 @@ class Agent(nn.Module):
 
   def __init__(self, state_dim, action_dim, width):
     super().__init__()
-    self.representation_network = Representation(state_dim * 8, state_dim * 4, width)
+    self.representation_network = Representation(state_dim * num_state_stack, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
     self.optimizer = torch.optim.AdamW(self.parameters(), lr=0.00032, weight_decay=0)
@@ -215,9 +353,11 @@ class Agent(nn.Module):
     self.action_replay = []
     self.P_replay = []
     self.r_replay = []
+    self.ast_strs = load_worlds()
 
     self.action_space = action_dim
-    self.env = gym.make(game_name)
+    # ast_num = epoch % 10
+    self.env = None#State()#gym.make(game_name)
 
     self.var = 0
     self.beta_product = 1.0
@@ -233,14 +373,17 @@ class Agent(nn.Module):
     Eight previous observations stacked -> representation network -> prediction network
     -> sampling action follow policy -> next env step
     """
-    game_score = 0
-    state = self.env.reset()
+    # state = self.env#.reset()no reset for now
+    ast_num = np.random.choice(10)
+    self.env = State(self.ast_strs[ast_num])
+    base_tm = self.env.set_base_tm()
+    state = self.env.feature()
     state_dim = len(state)
     for i in range(max_timestep):
       start_state = state
       if i == 0:
         # stacked_state = np.concatenate((state, state, state, state, state, state, state, state), axis=0)
-        stacked_state = np.concatenate((state, for _ in range(num_stack)), axis=0) # for now just stack 2
+        stacked_state = np.concatenate(tuple(state for _ in range(num_state_stack)), axis=0) # for now just stack 2
       else:
         stacked_state = np.roll(stacked_state, -state_dim, axis=0)
         stacked_state[-state_dim:] = state
@@ -248,19 +391,20 @@ class Agent(nn.Module):
       with torch.no_grad():
         hs = self.representation_network(torch.from_numpy(stacked_state).float().to(device))
         P, v = self.prediction_network(hs)
-      action = np.random.choice(np.arange(self.action_space), p=P.detach().cpu().numpy())
-      state, r, done, info = self.env.step(action)
-
+      probs = P.detach().cpu().numpy()
+      action = self.env.get_valid_action(probs)
+      # action = np.random.choice(np.arange(self.action_space), p=P.detach().cpu().numpy())
+      self.env, state, r, done, info = self.env.step(action) # todo fix self.env
       if i == 0:
-        for _ in range(num_stack):
+        for _ in range(num_state_stack):
           self.state_traj.append(start_state)
       else:
         self.state_traj.append(start_state)
       self.action_traj.append(action)
       self.P_traj.append(P.cpu().numpy())
       self.r_traj.append(r)
-
-      game_score += r
+      # print('step reward', r, 'done', done)
+      # game_score += r
 
       ## For fix lunarlander-v2 env does not return reward -100 when 'TimeLimit.truncated'
       if done:
@@ -268,6 +412,7 @@ class Agent(nn.Module):
         #   game_score -= 100
         #   self.r_traj[-1] = -100
         #   r = -100
+        print('steps done', self.env.steps, 'failed', self.env.failed)
         last_frame = i
         break
 
@@ -287,11 +432,15 @@ class Agent(nn.Module):
     self.P_replay.append(self.P_traj)
     self.r_replay.append(self.r_traj)
 
-    writer.add_scalars('Selfplay',
+    # writer.add_scalars('Selfplay',
+    #                    {'lastreward': r,
+    #                     'lastframe': last_frame + 1
+    #                     }, global_i)
+    print('Selfplay',
                        {'lastreward': r,
                         'lastframe': last_frame + 1
                         }, global_i)
-
+    game_score = (base_tm - self.env.last_tm) / base_tm
     return game_score, r, last_frame
 
   def update_weights_mu(self, target):
@@ -307,7 +456,7 @@ class Agent(nn.Module):
     regularizer_multiplier: 5
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
-    train_updates = 20
+    print("update_weights_mu")
     for _ in range(train_updates):
       state_traj = []
       action_traj = []
@@ -328,9 +477,10 @@ class Agent(nn.Module):
           G = 0.997 * G + r
           G_arr.append(G)
         G_arr.reverse()
-
-        for i in np.random.randint(len(self.state_replay[sel]) - 5 - 7, size=4):
-          state_traj.append(self.state_replay[sel][i:i + 13])
+        for i in np.random.randint(len(self.state_replay[sel]) - 5 - (num_state_stack - 1), size=4):
+        # for i in np.random.randint(len(self.state_replay[sel]) - 5 - 7, size=4):
+        #   state_traj.append(self.state_replay[sel][i:i + 13])
+          state_traj.append(self.state_replay[sel][i:i + 5 + num_state_stack])
           action_traj.append(self.action_replay[sel][i:i + 5])
           r_traj.append(self.r_replay[sel][i:i + 5])
           G_arr_mb.append(G_arr[i:i + 6])
@@ -344,34 +494,50 @@ class Agent(nn.Module):
       inferenced_P_arr = []
 
       ## stacking 8 frame
-      stacked_state_0 = torch.cat((state_traj[:, 0], state_traj[:, 1], state_traj[:, 2], state_traj[:, 3],
-                                   state_traj[:, 4], state_traj[:, 5], state_traj[:, 6], state_traj[:, 7]), dim=1)
-      # stacked_state_0 = torch.cat((state_traj[:, i], for i in range(num_stack)), dim=1)
+      # stacked_state_0 = torch.cat((state_traj[:, 0], state_traj[:, 1], state_traj[:, 2], state_traj[:, 3],
+      #                              state_traj[:, 4], state_traj[:, 5], state_traj[:, 6], state_traj[:, 7]), dim=1)
+      stacked_state_0 = torch.cat(tuple(state_traj[:, i] for i in range(num_state_stack)), dim=1)
 
       ## agent network inference (5 step unroll)
-      first_hs = self.representation_network(stacked_state_0)
-      first_P, first_v_logits = self.prediction_network(first_hs)
-      inferenced_P_arr.append(first_P)
+      hs_s = []
+      v_logits_s = []
+      r_logits_s = []
+      for i in range(6):
+        if i == 0:
+          hs = self.representation_network(stacked_state_0)
+        else:
+          hs, r_logits = self.dynamics_network(hs, action_traj[:, i-1])
+          r_logits_s.append(r_logits)
 
-      second_hs, r_logits = self.dynamics_network(first_hs, action_traj[:, 0])
-      second_P, second_v_logits = self.prediction_network(second_hs)
-      inferenced_P_arr.append(second_P)
+        P, v_logits = self.prediction_network(hs)
+        hs_s.append(hs)
+        v_logits_s.append(v_logits)
+        inferenced_P_arr.append(P)
+      first_P = inferenced_P_arr[0]
 
-      third_hs, r2_logits = self.dynamics_network(second_hs, action_traj[:, 1])
-      third_P, third_v_logits = self.prediction_network(third_hs)
-      inferenced_P_arr.append(third_P)
+      # first_hs = self.representation_network(stacked_state_0)
+      # first_P, first_v_logits = self.prediction_network(first_hs)
+      # inferenced_P_arr.append(first_P)
 
-      fourth_hs, r3_logits = self.dynamics_network(third_hs, action_traj[:, 2])
-      fourth_P, fourth_v_logits = self.prediction_network(fourth_hs)
-      inferenced_P_arr.append(fourth_P)
-
-      fifth_hs, r4_logits = self.dynamics_network(fourth_hs, action_traj[:, 3])
-      fifth_P, fifth_v_logits = self.prediction_network(fifth_hs)
-      inferenced_P_arr.append(fifth_P)
-
-      sixth_hs, r5_logits = self.dynamics_network(fifth_hs, action_traj[:, 4])
-      sixth_P, sixth_v_logits = self.prediction_network(sixth_hs)
-      inferenced_P_arr.append(sixth_P)
+      # second_hs, r_logits = self.dynamics_network(first_hs, action_traj[:, 0])
+      # second_P, second_v_logits = self.prediction_network(second_hs)
+      # inferenced_P_arr.append(second_P)
+      #
+      # third_hs, r2_logits = self.dynamics_network(second_hs, action_traj[:, 1])
+      # third_P, third_v_logits = self.prediction_network(third_hs)
+      # inferenced_P_arr.append(third_P)
+      #
+      # fourth_hs, r3_logits = self.dynamics_network(third_hs, action_traj[:, 2])
+      # fourth_P, fourth_v_logits = self.prediction_network(fourth_hs)
+      # inferenced_P_arr.append(fourth_P)
+      #
+      # fifth_hs, r4_logits = self.dynamics_network(fourth_hs, action_traj[:, 3])
+      # fifth_P, fifth_v_logits = self.prediction_network(fifth_hs)
+      # inferenced_P_arr.append(fifth_P)
+      #
+      # sixth_hs, r5_logits = self.dynamics_network(fifth_hs, action_traj[:, 4])
+      # sixth_P, sixth_v_logits = self.prediction_network(sixth_hs)
+      # inferenced_P_arr.append(sixth_P)
 
       ## target network inference
       with torch.no_grad():
@@ -432,8 +598,9 @@ class Agent(nn.Module):
       ## L_m
       L_m = 0
       for i in range(5):
-        stacked_state = torch.cat((state_traj[:, i + 1], state_traj[:, i + 2], state_traj[:, i + 3], state_traj[:, i + 4],
-                                   state_traj[:, i + 5], state_traj[:, i + 6], state_traj[:, i + 7], state_traj[:, i + 8]), dim=1)
+        # stacked_state = torch.cat((state_traj[:, i + 1], state_traj[:, i + 2], state_traj[:, i + 3], state_traj[:, i + 4],
+        #                            state_traj[:, i + 5], state_traj[:, i + 6], state_traj[:, i + 7], state_traj[:, i + 8]), dim=1)
+        stacked_state = torch.cat(tuple(state_traj[:, i + j+1] for j in range(num_state_stack)), dim=1)
         with torch.no_grad():
           t_hs = target.representation_network(stacked_state)
           t_P, t_v_logits = target.prediction_network(t_hs)
@@ -465,7 +632,8 @@ class Agent(nn.Module):
           exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
 
         ## Paper appendix F.2 : Prior policy
-        t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * torch.tensor([[0.25, 0.25, 0.25, 0.25] for _ in range(16)]).to(device)
+        # t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * torch.tensor([[0.25, 0.25, 0.25, 0.25] for _ in range(16)]).to(device)
+        t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((16,self.env.action_length()))/self.env.action_length()).to(device)
 
         pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
                         * exp_clip_adv_arr[k])
@@ -481,31 +649,46 @@ class Agent(nn.Module):
       ## L_v
       ls = nn.LogSoftmax(dim=-1)
 
+      # L_v = -1 * (
+      #   (to_cr(G_arr_mb[:, 0]) * ls(first_v_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(G_arr_mb[:, 1]) * ls(second_v_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(G_arr_mb[:, 2]) * ls(third_v_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(G_arr_mb[:, 3]) * ls(fourth_v_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(G_arr_mb[:, 4]) * ls(fifth_v_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(G_arr_mb[:, 5]) * ls(sixth_v_logits)).sum(-1, keepdim=True)
+      # )
       L_v = -1 * (
-        (to_cr(G_arr_mb[:, 0]) * ls(first_v_logits)).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 1]) * ls(second_v_logits)).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 2]) * ls(third_v_logits)).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 3]) * ls(fourth_v_logits)).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 4]) * ls(fifth_v_logits)).sum(-1, keepdim=True)
-        + (to_cr(G_arr_mb[:, 5]) * ls(sixth_v_logits)).sum(-1, keepdim=True)
+        (to_cr(G_arr_mb[:, 0]) * ls(v_logits_s[0])).sum(-1, keepdim=True)
+        + (to_cr(G_arr_mb[:, 1]) * ls(v_logits_s[1])).sum(-1, keepdim=True)
+        + (to_cr(G_arr_mb[:, 2]) * ls(v_logits_s[2])).sum(-1, keepdim=True)
+        + (to_cr(G_arr_mb[:, 3]) * ls(v_logits_s[3])).sum(-1, keepdim=True)
+        + (to_cr(G_arr_mb[:, 4]) * ls(v_logits_s[4])).sum(-1, keepdim=True)
+        + (to_cr(G_arr_mb[:, 5]) * ls(v_logits_s[5])).sum(-1, keepdim=True)
       )
-
       ## L_r
       L_r = -1 * (
-        (to_cr(r_traj[:, 0]) * ls(r_logits)).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 1]) * ls(r2_logits)).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 2]) * ls(r3_logits)).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 3]) * ls(r4_logits)).sum(-1, keepdim=True)
-        + (to_cr(r_traj[:, 4]) * ls(r5_logits)).sum(-1, keepdim=True)
+        (to_cr(r_traj[:, 0]) * ls(r_logits_s[0])).sum(-1, keepdim=True)
+        + (to_cr(r_traj[:, 1]) * ls(r_logits_s[1])).sum(-1, keepdim=True)
+        + (to_cr(r_traj[:, 2]) * ls(r_logits_s[2])).sum(-1, keepdim=True)
+        + (to_cr(r_traj[:, 3]) * ls(r_logits_s[3])).sum(-1, keepdim=True)
+        + (to_cr(r_traj[:, 4]) * ls(r_logits_s[4])).sum(-1, keepdim=True)
       )
+      # L_r = -1 * (
+      #   (to_cr(r_traj[:, 0]) * ls(r_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(r_traj[:, 1]) * ls(r2_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(r_traj[:, 2]) * ls(r3_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(r_traj[:, 3]) * ls(r4_logits)).sum(-1, keepdim=True)
+      #   + (to_cr(r_traj[:, 4]) * ls(r5_logits)).sum(-1, keepdim=True)
+      # )
 
       ## start of dynamics network gradient *0.5
-      first_hs.register_hook(lambda grad: grad * 0.5)
-      second_hs.register_hook(lambda grad: grad * 0.5)
-      third_hs.register_hook(lambda grad: grad * 0.5)
-      fourth_hs.register_hook(lambda grad: grad * 0.5)
-      fifth_hs.register_hook(lambda grad: grad * 0.5)
-      sixth_hs.register_hook(lambda grad: grad * 0.5)
+      for i in range(6): hs_s[i].register_hook(lambda grad: grad * 0.5)
+      # first_hs.register_hook(lambda grad: grad * 0.5)
+      # second_hs.register_hook(lambda grad: grad * 0.5)
+      # third_hs.register_hook(lambda grad: grad * 0.5)
+      # fourth_hs.register_hook(lambda grad: grad * 0.5)
+      # fifth_hs.register_hook(lambda grad: grad * 0.5)
+      # sixth_hs.register_hook(lambda grad: grad * 0.5)
 
       ## total loss
       L_total = L_pg_cmpo + L_v / 6 / 4 + L_r / 5 / 1 + L_m
@@ -533,34 +716,47 @@ class Agent(nn.Module):
     self.P_traj.clear()
     self.r_traj.clear()
 
-    writer.add_scalars('Loss', {'L_total': L_total.mean(),
+    # writer.add_scalars('Loss', {'L_total': L_total.mean(),
+    #                             'L_pg_cmpo': L_pg_cmpo.mean(),
+    #                             'L_v': (L_v / 6 / 4).mean(),
+    #                             'L_r': (L_r / 5 / 1).mean(),
+    #                             'L_m': (L_m).mean()
+    #                             }, global_i)
+    #
+    # writer.add_scalars('vars', {'self.var': self.var,
+    #                             'self.var_m': self.var_m[0]
+    #                             }, global_i)
+    print('Loss', {'L_total': L_total.mean(),
                                 'L_pg_cmpo': L_pg_cmpo.mean(),
                                 'L_v': (L_v / 6 / 4).mean(),
                                 'L_r': (L_r / 5 / 1).mean(),
                                 'L_m': (L_m).mean()
                                 }, global_i)
 
-    writer.add_scalars('vars', {'self.var': self.var,
+    print('vars', {'self.var': self.var,
                                 'self.var_m': self.var_m[0]
                                 }, global_i)
 
     return
 
-%rm - rf
-scalar /
-%load_ext
-tensorboard
-%tensorboard - -logdir
-scalar - -port = 6008
-
 device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 score_arr = []
-game_name = 'LunarLander-v2'
-env = gym.make(game_name)
-target = Target(env.observation_space.shape[0], env.action_space.n, 128)
-agent = Agent(env.observation_space.shape[0], env.action_space.n, 128)
-print(agent)
-env.close()
+# game_name = 'LunarLander-v2'
+# env = gym.make(game_name)
+# env = State()
+num_state_stack = 2
+train_updates = 5
+
+ast_strs = load_worlds()
+env = State(ast_strs[0])
+observation_space = env.feature_shape()
+action_space = env.action_length()
+target = Target(observation_space[0], action_space, 128)
+agent = Agent(observation_space[0], action_space, 128)
+# target = Target(env.observation_space.shape[0], env.action_space.n, 128)
+# agent = Agent(env.observation_space.shape[0], env.action_space.n, 128)
+# print(agent)
+# env.close()
 
 ## initialization
 target.load_state_dict(agent.state_dict())
@@ -568,14 +764,16 @@ target.load_state_dict(agent.state_dict())
 ## Self play & Weight update loop
 episode_nums = 4000
 for i in range(episode_nums):
-  writer = SummaryWriter(logdir='scalar/')
+  # writer = SummaryWriter(logdir='scalar/')
   global_i = i
   game_score, last_r, frame = agent.self_play_mu()
-  writer.add_scalar('score', game_score, global_i)
+  # writer.add_scalar('score', game_score, global_i)
+  print('score', game_score, 'iteration', global_i)
+
 
   score_arr.append(game_score)
   if i % 10 == 0:
-    mean_score = np.mean(np.array(score_arr[i - 30:i]))
+    mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
     # print('episode, avg, score, last_r, len\n', i, mean_score, int(game_score), last_r, frame)
 
   if i % 100 == 0:
@@ -587,7 +785,7 @@ for i in range(episode_nums):
     break
 
   agent.update_weights_mu(target)
-  writer.close()
+  # writer.close()
 
 torch.save(agent.state_dict(), 'weights.pt')
 agent.env.close()
