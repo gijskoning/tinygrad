@@ -396,7 +396,7 @@ class Agent(nn.Module):
     self.var_m = [0 for _ in range(5)]
     self.beta_product_m = [1.0 for _ in range(5)]
 
-  def self_play_mu(self, max_timestep=10000):
+  def self_play_mu(self, target, max_timestep=10000):
     """Self-play and save trajectory to replay buffer
 
     (Originally target network used to inference policy, but i used agent network instead) # todo
@@ -421,8 +421,8 @@ class Agent(nn.Module):
         stacked_state[-state_dim:] = state
 
       with torch.no_grad():
-        hs = self.representation_network(torch.from_numpy(stacked_state).float().to(device))
-        P, v = self.prediction_network(hs)
+        hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device))
+        P, v = target.prediction_network(hs)
       probs = P.detach().cpu().numpy()
       action = self.env.get_valid_action(probs)
       # action = np.random.choice(np.arange(self.action_space), p=P.detach().cpu().numpy())
@@ -812,7 +812,7 @@ episode_nums = 4000
 for i in range(episode_nums):
   # writer = SummaryWriter(logdir='scalar/')
   global_i = i
-  game_score, base_to_handcoded, last_r, frame, ast_num = agent.self_play_mu()
+  game_score, base_to_handcoded, last_r, frame, ast_num = agent.self_play_mu(target)
   more_than_handcoded = game_score - base_to_handcoded
   if best_ast_num_scores[ast_num] < game_score:
     best_ast_num_scores[ast_num] = game_score
