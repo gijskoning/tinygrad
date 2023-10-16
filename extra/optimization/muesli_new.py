@@ -1,5 +1,6 @@
 import functools
 import os
+import shelve
 import time
 from datetime import datetime
 
@@ -23,7 +24,7 @@ from torch_poly_lr_decay import PolynomialLRDecay
 
 from extra.optimization.helpers import MAX_DIMS, ast_str_to_lin, lin_to_feats, load_worlds
 from tinygrad.codegen import search
-from tinygrad.codegen.search import bufs_from_lin, time_linearizer
+from tinygrad.codegen.search import beam_search, bufs_from_lin, time_linearizer
 
 @functools.lru_cache(None)
 def get_tm_cached(ast_str, handcoded=True):
@@ -86,11 +87,12 @@ class State:
     return self.base_tm
   def reward(self):
     failed = False
+    assert self.base_tm is not None
     try:
       rawbufs = bufs_from_lin(self.original_lin)
-      if self.base_tm is None:
-        self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
-        assert not math.isinf(self.tm)
+      # if self.base_tm is None:
+      #   self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
+      #   assert not math.isinf(self.tm)
       if self._reward is None:
         tm = time_linearizer(self.lin, rawbufs)
         assert not math.isinf(tm)
@@ -432,7 +434,8 @@ class Agent(nn.Module):
 
     game_score = (base_tm - self.env.last_tm) / base_tm
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
-    return game_score, base_to_handcoded, r, last_frame, ast_num
+    base_to_beam = (base_tm - beam_results[ast_num]) / base_tm
+    return game_score, base_to_handcoded, base_to_beam, r, last_frame, ast_num
 
   def update_weights_mu(self, target):
     """Optimize network weights.
@@ -500,30 +503,6 @@ class Agent(nn.Module):
         v_logits_s.append(v_logits)
         inferenced_P_arr.append(P)
       first_P = inferenced_P_arr[0]
-
-      # first_hs = self.representation_network(stacked_state_0)
-      # first_P, first_v_logits = self.prediction_network(first_hs)
-      # inferenced_P_arr.append(first_P)
-
-      # second_hs, r_logits = self.dynamics_network(first_hs, action_traj[:, 0])
-      # second_P, second_v_logits = self.prediction_network(second_hs)
-      # inferenced_P_arr.append(second_P)
-      #
-      # third_hs, r2_logits = self.dynamics_network(second_hs, action_traj[:, 1])
-      # third_P, third_v_logits = self.prediction_network(third_hs)
-      # inferenced_P_arr.append(third_P)
-      #
-      # fourth_hs, r3_logits = self.dynamics_network(third_hs, action_traj[:, 2])
-      # fourth_P, fourth_v_logits = self.prediction_network(fourth_hs)
-      # inferenced_P_arr.append(fourth_P)
-      #
-      # fifth_hs, r4_logits = self.dynamics_network(fourth_hs, action_traj[:, 3])
-      # fifth_P, fifth_v_logits = self.prediction_network(fifth_hs)
-      # inferenced_P_arr.append(fifth_P)
-      #
-      # sixth_hs, r5_logits = self.dynamics_network(fifth_hs, action_traj[:, 4])
-      # sixth_P, sixth_v_logits = self.prediction_network(sixth_hs)
-      # inferenced_P_arr.append(sixth_P)
 
       ## target network inference
       with torch.no_grad():
@@ -673,18 +652,6 @@ class Agent(nn.Module):
     writer.add_scalars('vars', {'self.var': self.var,
                                 'self.var_m': self.var_m[0]
                                 }, global_i)
-    # print('Loss', {'L_total': L_total.mean(),
-    #                             'L_pg_cmpo': L_pg_cmpo.mean(),
-    #                             'L_v': (L_v / 6 / 4).mean(),
-    #                             'L_r': (L_r / 5 / 1).mean(),
-    #                             'L_m': (L_m).mean()
-    #                             }, global_i)
-    #
-    # print('vars', {'self.var': self.var,
-    #                             'self.var_m': self.var_m[0]
-    #                             }, global_i)
-
-    return
 
 device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 score_arr = []
@@ -694,7 +661,7 @@ num_replays = 64
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 num_state_stack = 1
-first_ast_nums = 2
+first_ast_nums = 4
 train_updates = 30
 episodes_per_train_update = 5
 alpha_target = 0.05 # 5% new to target
@@ -724,11 +691,38 @@ agent = Agent(observation_space[0], action_space, 256)
 target.load_state_dict(agent.state_dict())
 best_ast_num_scores = np.zeros(first_ast_nums)
 handcoded_best_ast_num_scores = np.zeros(first_ast_nums)
+global_db = shelve.open("/tmp/greedy_cache")
+
+beam_results = []
+beams = 8
+# beam search 4 takes [39 and 5] for 2 ast nums
+# beam search 8 takes [94,9,17, 91]
+
+# to add to observation
+# https://arxiv.org/pdf/2301.07608.pdf
+# name, dim
+# TRIALS REMAINING 5 # one hot. so max of 5 trials for example
+# reward previous step 1
+for i in range(first_ast_nums):
+  st = time.perf_counter()
+  lin = ast_str_to_lin(ast_strs[i])
+  rawbufs = bufs_from_lin(lin)
+  key = str((lin.ast, beams))
+  if key in global_db:
+    for ao in global_db[key]:
+      lin.apply_opt(ao)
+  else:
+    print("running beam search for num", i)
+    lin = beam_search(lin, rawbufs, beams)
+    global_db[key] = lin.applied_opts
+  tm = time_linearizer(lin, rawbufs, should_copy=False)
+  beam_results.append(tm)
+  print('beam result', tm, 'time', time.perf_counter() - st)
 ## Self play & Weight update loop
 for i in range(episode_nums):
   writer = SummaryWriter(log_dir=f'scalar{exp_str}/')
   global_i = i
-  game_score, base_to_handcoded, last_r, frame, ast_num = agent.self_play_mu(target)
+  game_score, base_to_handcoded, base_to_beam, last_r, frame, ast_num = agent.self_play_mu(target)
   more_than_handcoded = game_score - base_to_handcoded
   if best_ast_num_scores[ast_num] < game_score:
     best_ast_num_scores[ast_num] = game_score
@@ -767,17 +761,19 @@ for i in range(episode_nums):
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
     scores = []
     for i in range(first_ast_nums):
-      print('eval selfplay')
-      game_score, base_to_handcoded, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
+      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
       more_than_handcoded = game_score - base_to_handcoded
+      more_than_beam = game_score - base_to_beam
 
-      scores.append([game_score, more_than_handcoded])
+      scores.append([game_score, more_than_handcoded, base_to_beam])
     scores = np.array(scores)
     writer.add_scalar('eval/relative_to_base_score', scores[:,0].mean(), global_i)
     writer.add_scalar('eval/more_than_handcoded', scores[:,1].mean(), global_i)
+    writer.add_scalar('eval/more_than_beam', scores[:,2].mean(), global_i)
 
     print('eval relative_to_base_score', scores[:,0])
     print('eval more_than_handcoded', scores[:,1])
+    print('eval more_than_beam', scores[:,2])
   # writer.close()
 
 torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
