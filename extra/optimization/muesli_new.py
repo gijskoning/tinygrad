@@ -159,6 +159,7 @@ class State:
         return act
       try:
         lin = self._step(act).lin
+        lin_to_feats(lin) # todo this is temp, it can sometimes raise an error
         up, lcl = 1, 1
         try:
           for s, c in zip(lin.full_shape, lin.colors()):
@@ -393,7 +394,7 @@ class Agent(nn.Module):
     self.var_m = [0 for _ in range(unroll_steps)]
     self.beta_product_m = [1.0 for _ in range(unroll_steps)]
 
-  def self_play_mu(self, max_timestep=10000):
+  def self_play_mu(self, ast_num=None, eval=False, max_timestep=10000):
     """Self-play and save trajectory to replay buffer
 
     (Originally target network used to inference policy, but i used agent network instead) # todo
@@ -402,7 +403,8 @@ class Agent(nn.Module):
     -> sampling action follow policy -> next env step
     """
     # state = self.env#.reset()no reset for now
-    ast_num = np.random.choice(first_ast_nums)
+    if ast_num is None:
+      ast_num = np.random.choice(first_ast_nums)
     self.env = State(self.ast_strs, ast_num)
     base_tm = self.env.set_base_tm()
     state = self.env.feature()
@@ -426,7 +428,7 @@ class Agent(nn.Module):
       probs = P.detach().cpu().numpy()
       action = self.env.get_valid_action(probs)
       # action = np.random.choice(np.arange(self.action_space), p=P.detach().cpu().numpy())
-      self.env, state, r, done, info = self.env.step(action, dense_reward=True) # todo fix self.env
+      self.env, state, r, done, info = self.env.step(action, dense_reward=not eval)
       if i == 0:
         for _ in range(num_state_stack):
           state_traj.append(start_state)
@@ -457,17 +459,17 @@ class Agent(nn.Module):
     for _ in range(unroll_steps+1):
       r_traj.append(0.0)
       action_traj.append(-1)
-
+    if not eval:
       # traj append to replay
-    self.state_replay.append(state_traj)
-    self.action_replay.append(action_traj)
-    self.P_replay.append(P_traj)
-    self.r_replay.append(r_traj)
+      self.state_replay.append(state_traj)
+      self.action_replay.append(action_traj)
+      self.P_replay.append(P_traj)
+      self.r_replay.append(r_traj)
 
-    writer.add_scalars('Selfplay',
-                       {'lastreward': r,
-                        'lastframe': last_frame + 1
-                        }, global_i)
+      writer.add_scalars('Selfplay',
+                         {'lastreward': r,
+                          'lastframe': last_frame + 1
+                          }, global_i)
     print('Selfplay',
                        {'lastreward': r,
                         'lastframe': last_frame + 1
@@ -489,7 +491,6 @@ class Agent(nn.Module):
     regularizer_multiplier: 5
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
-    print("update_weights_mu")
     for _ in range(train_updates):
       state_traj = []
       action_traj = []
@@ -625,7 +626,7 @@ class Agent(nn.Module):
 
       ## L_m eq. 13
       L_m = 0
-      for i in range(unroll_steps): # todo should check more unroll_steps = 5 numbers
+      for i in range(unroll_steps):
         stacked_state = torch.cat(tuple(state_traj[:, i + j+1] for j in range(num_state_stack)), dim=1)
         with torch.no_grad():
           t_hs = target.representation_network(stacked_state)
@@ -641,10 +642,10 @@ class Agent(nn.Module):
           r1_arr = []
           v1_arr = []
           a1_arr = []
-          for j in range(self.action_space):
-            action1_stack = j*np.ones(len(t_P), dtype=np.int64) # only correct when not sampling a subset
-            # for _ in t_P:
-            #   action1_stack.append(j) # wait why no arange?
+          for j in range(lookahead_samples2):
+            action1_stack = []
+            for p in t_P:
+              action1_stack.append(np.random.choice(np.arange(self.action_space), p=p.detach().cpu().numpy()))
             hs, r1 = target.dynamics_network(t_hs, torch.unsqueeze(torch.tensor(action1_stack), 1))
             _, v1 = target.prediction_network(hs)
 
@@ -654,7 +655,7 @@ class Agent(nn.Module):
 
         with torch.no_grad():
           exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + 0.997 * v1_arr[k] - to_scalar(t_v_logits)) / under, -1, 1))
-                              .tolist() for k in range(self.action_space)]
+                              .tolist() for k in range(lookahead_samples2)]
           exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
 
         ## Paper appendix F.2 : Prior policy
@@ -662,12 +663,14 @@ class Agent(nn.Module):
 
         pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
                         * exp_clip_adv_arr[k])
-                       .squeeze(-1).tolist() for k in range(self.action_space)]
+                       .squeeze(-1).tolist() for k in range(lookahead_samples2)]
 
         pi_cmpo_all = torch.tensor(pi_cmpo_all).transpose(0, 1).to(device)
         pi_cmpo_all = pi_cmpo_all / torch.sum(pi_cmpo_all, dim=1).unsqueeze(-1)
         kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
-        L_m += kl_loss(torch.log(inferenced_P_arr[i + 1]), pi_cmpo_all)
+        # I think this is right. todo but not completely sure
+        P_arr_selected_actions = torch.gather(inferenced_P_arr[i + 1], 1, torch.stack(a1_arr).T.to(device))
+        L_m += kl_loss(torch.log(P_arr_selected_actions), pi_cmpo_all)
 
       L_m /= unroll_steps
 
@@ -731,25 +734,26 @@ device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('
 score_arr = []
 score_arr_handcoded = []
 
-num_replays = 32
-seq_in_replay = 4
+num_replays = 64
+seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 num_state_stack = 1
-first_ast_nums = 50
+first_ast_nums = 2
 train_updates = 5
 alpha_target = 0.05 # 5% new to target
 
 regularizer_multiplier = 1 # was 5 but that seems very high
 
-lookahead_samples = 20
+lookahead_samples = 16
+lookahead_samples2 = 16 # this is in the unroll
 unroll_steps = 3 # todo cannot be changed at the moment
-start_training_epoch = 0
+start_training_epoch = 5
 ast_strs = load_worlds()
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 action_space = env.action_length()
 episode_nums = 10000
-exp_str = '2' # 1,
+exp_str = '3' # 1,
 del env
 target = Target(observation_space[0], action_space, 256)
 agent = Agent(observation_space[0], action_space, 256)
@@ -775,29 +779,45 @@ for i in range(episode_nums):
 
   print(f'relative speed score {game_score:.4f} relative % more than handcoded {more_than_handcoded:.4f} iteration {global_i}')
   print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
-  diff_best_handcoded = best_ast_num_scores - handcoded_best_ast_num_scores
-  print('Diff with best handcoded scores for each ast num', (diff_best_handcoded).round(2).tolist())
-  print('mean diff', diff_best_handcoded.mean().round(2).tolist())
+  # diff_best_handcoded = best_ast_num_scores - handcoded_best_ast_num_scores
+  # print('Diff with best handcoded scores for each ast num', (diff_best_handcoded).round(2).tolist())
+  # print('mean diff', diff_best_handcoded.mean().round(2).tolist())
   writer.add_scalar('relative_to_base_score', game_score, global_i)
   writer.add_scalar('more_than_handcoded', more_than_handcoded, global_i)
-  writer.add_scalar('diff_to_best_handcoded', diff_best_handcoded.mean(), global_i)
+  # writer.add_scalar('diff_to_best_handcoded', diff_best_handcoded.mean(), global_i)
 
   score_arr.append(game_score)
   score_arr_handcoded.append(more_than_handcoded)
-  if i % 10 == 0:
-    mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
-    more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i+1]))
-    print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
+
   if i % 100 == 0:
     torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
 
-  if mean_score > 250 and np.mean(np.array(score_arr[-5:])) > 250:
-    torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
-    print('Done')
-    break
+  # if mean_score > 250 and np.mean(np.array(score_arr[-5:])) > 250:
+  #   torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
+  #   print('Done')
+  #   break
   if i >= start_training_epoch:
+    print("Training update")
     agent.update_weights_mu(target)
     print("Done update")
+
+  if i % 10 == 0 and i >= start_training_epoch:
+    mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
+    more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i+1]))
+    print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
+    scores = []
+    for i in range(first_ast_nums):
+      print('eval selfplay')
+      game_score, base_to_handcoded, _, frame, _ = agent.self_play_mu(ast_num=i, eval=True)
+      more_than_handcoded = game_score - base_to_handcoded
+
+      scores.append([game_score, more_than_handcoded])
+    scores = np.array(scores)
+    writer.add_scalar('eval/relative_to_base_score', scores[:,0].mean(), global_i)
+    writer.add_scalar('eval/more_than_handcoded', scores[:,1].mean(), global_i)
+
+    print('eval relative_to_base_score', scores[:,0])
+    print('eval more_than_handcoded', scores[:,1])
   # writer.close()
 
 torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
