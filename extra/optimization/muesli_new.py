@@ -193,18 +193,21 @@ class Representation(nn.Module):
     self.embed_obs = torch.nn.Linear(input_dim+self.pos_dim, self.embed_dim) # might want to add selfattention here
     R = get_sinusoid_pos_encoding(self.total_len, self.pos_dim)
     self.R = torch.flip(R, dims=(0,)).to(device)
-    num_heads = 4
+    num_heads = 8
     self.w_r = nn.Linear(self.pos_dim, self.pos_dim, bias=False)
     self.transformer_model = SelfAttention(num_heads, embed_dimension=self.embed_dim, dropout=0.1)
-    self.skip = torch.nn.Linear(input_dim, output_dim)
-    self.layer1 = torch.nn.Linear(self.embed_dim, width)
+    self.skip = torch.nn.Linear(input_dim, width)
+    self.skip2 = torch.nn.Linear(width, output_dim)
+    self.layer1 = torch.nn.Linear(self.embed_dim if use_transformer else input_dim, width)
     self.layer2 = torch.nn.Linear(width, width)
     # self.layer3 = torch.nn.Linear(width, width)
     # self.layer4 = torch.nn.Linear(width, width)
     self.layer5 = torch.nn.Linear(width, output_dim)
+    # if not use_transformer
 
-  def forward(self, hist_x, end_pos=None):
-    # hist_x is sorted such that the first element is the oldest
+
+  def forward(self, hist_x, last_pos=None):
+    # assumes hist_x is orderd in steps [0,1...last_pos, ..., MAX_DIMS-1]
     # x: stacked obs
     hist_x = hist_x.reshape(-1, num_state_stack, self.input_dim) # batch, num_seqs, dim
     # hist_x = hist_x[-steps:] # the history was stacked first. But we don't want the stacked frames. HACKKYY
@@ -220,24 +223,26 @@ class Representation(nn.Module):
     # start_pos = self.seq_len - steps
     mask = torch.full((batch_num, 1, self.total_len, self.total_len), float("-inf"), device=device)
     for i in range(batch_num):
-      mask[i] = mask[i].triu(end_pos[i])
+      mask[i] = mask[i].triu(last_pos[i]+1)
+    if use_transformer:
+      out_transformer = self.transformer_model(embed_x, mask=mask)
+      out_transformer = out_transformer[:, -1] # get last output
 
-    out_transformer = self.transformer_model(embed_x, mask=mask)
-    out_transformer = out_transformer[:, -1] # get last output
-    # do we need softmax??
-    last_obs = hist_x[:,0]
-    s = self.skip(last_obs)
-    x = self.layer1(out_transformer)
-
-    x = torch.nn.functional.relu(x)
-    x = self.layer2(x)
-    x = torch.nn.functional.relu(x)
+    last_obs = torch.empty((batch_num, self.input_dim)).to(device)
+    for i in range(batch_num):
+      last_obs[i] = hist_x[i, last_pos[i]]
+    s = F.relu(self.skip(last_obs))
+    s = F.relu(self.skip2(s))
+    if not use_transformer:
+      out_transformer = last_obs
+    x = F.relu(self.layer1(out_transformer))
+    x = F.relu(self.layer2(x))
     # x = self.layer3(x)
     # x = torch.nn.functional.relu(x)
     # x = self.layer4(x)
     # x = torch.nn.functional.relu(x)
-    x = self.layer5(x)
-    x = torch.nn.functional.relu(x + s)
+    x = F.relu(self.layer5(x))
+    x = F.relu(x + s)
     assert torch.isfinite(x).all()
     x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
     assert torch.isfinite(x).all()
@@ -459,8 +464,7 @@ class Agent(nn.Module):
       # basetiming to state
       with torch.no_grad():
         # st = time.perf_counter()
-        steps = i+1
-        hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device), end_pos=np.array([steps]))
+        hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device), last_pos=np.array([i]))
         # print('time for representation', time.perf_counter() - st)
         P, v = target.prediction_network(hs)
       probs = P.detach().cpu().numpy()
@@ -508,7 +512,7 @@ class Agent(nn.Module):
     base_to_beam = (base_tm - beam_results[ast_num]) / base_tm
     return game_score, base_to_handcoded, base_to_beam, r, last_frame, ast_num
 
-  def update_weights_mu(self, target):
+  def update_weights_mu(self, target:Target):
     """Optimize network weights.
 
     Iteration: 20
@@ -530,25 +534,25 @@ class Agent(nn.Module):
       G_arr_mb = []
 
       for epi_sel in range(num_replays): # this is q
-        if (epi_sel > 0):  ## replay proportion
-          sel = np.random.randint(0, max(1,len(self.state_replay)-1))
+        if (epi_sel > num_replays//4):  ## 1/4 of replay buffer is used for on-policy data
+          ep_i = np.random.randint(0, max(1,len(self.state_replay)-1))
         else:
-          sel = -1
+          ep_i = -np.random.randint(max(1,episodes_per_train_update)) # pick one of the newest episodes
 
         ## multi step return G (orignally retrace used)
         G = 0
         G_arr = []
-        for r in self.r_replay[sel][::-1]:
+        for r in self.r_replay[ep_i][::-1]:
           G = 0.997 * G + r
           G_arr.append(G)
         G_arr.reverse()
-        for i in np.random.randint(len(self.state_replay[sel]) - unroll_steps - (num_state_stack - 1), size=seq_in_replay):
+        for i in np.random.randint(len(self.state_replay[ep_i]) - unroll_steps - (num_state_stack - 1), size=seq_in_replay):
           state_traj_i.append(i)
-          state_traj.append(self.state_replay[sel][i:i + unroll_steps + num_state_stack])
-          action_traj.append(self.action_replay[sel][i:i + unroll_steps])
-          r_traj.append(self.r_replay[sel][i:i + unroll_steps])
+          state_traj.append(self.state_replay[ep_i][i:i + unroll_steps + num_state_stack])
+          action_traj.append(self.action_replay[ep_i][i:i + unroll_steps])
+          r_traj.append(self.r_replay[ep_i][i:i + unroll_steps])
           G_arr_mb.append(G_arr[i:i + unroll_steps + 1])
-          P_traj.append(self.P_replay[sel][i])
+          P_traj.append(self.P_replay[ep_i][i])
       state_traj_i = np.array(state_traj_i)
       state_traj = torch.from_numpy(np.array(state_traj)).to(device)
       action_traj = torch.from_numpy(np.array(action_traj)).unsqueeze(2).to(device)
@@ -566,7 +570,7 @@ class Agent(nn.Module):
       r_logits_s = []
       for i in range(1+unroll_steps):
         if i == 0:
-          hs = self.representation_network(stacked_state_0, end_pos=state_traj_i+1)
+          hs = self.representation_network(stacked_state_0, last_pos=state_traj_i)
         else:
           hs, r_logits = self.dynamics_network(hs, action_traj[:, i-1])
           r_logits_s.append(r_logits)
@@ -579,7 +583,7 @@ class Agent(nn.Module):
 
       ## target network inference
       with torch.no_grad():
-        t_first_hs = target.representation_network(stacked_state_0, end_pos=state_traj_i+1)
+        t_first_hs = target.representation_network(stacked_state_0, last_pos=state_traj_i)
         t_first_P, t_first_v_logits = target.prediction_network(t_first_hs)
 
         ## normalized advantage
@@ -637,7 +641,7 @@ class Agent(nn.Module):
       for i in range(unroll_steps):
         stacked_state = torch.cat(tuple(state_traj[:, i + j+1] for j in range(num_state_stack)), dim=1)
         with torch.no_grad():
-          t_hs = target.representation_network(stacked_state, end_pos=state_traj_i+1+i)
+          t_hs = target.representation_network(stacked_state, last_pos=state_traj_i)
           t_P, t_v_logits = target.prediction_network(t_hs)
 
         beta_var = 0.99
@@ -737,6 +741,7 @@ train_updates = 30
 episodes_per_train_update = 5
 episodes_per_eval = 5
 start_training_epoch = 5 # todo set higher
+use_transformer = False
 alpha_target = 0.05 # 5% new to target
 
 regularizer_multiplier = 1 # was 5 but that seems very high
@@ -751,7 +756,7 @@ action_space = env.action_length()
 episode_nums = 1000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
-exp_str = 'test_'+timing_str # 1,
+exp_str = 'test_no_transformer_'+timing_str # 1,
 del env
 target = Target(observation_space[0], action_space, 256)
 target.eval()
