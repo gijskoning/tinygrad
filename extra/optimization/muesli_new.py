@@ -1,10 +1,13 @@
 import functools
 import os
+import random
 import shelve
 import time
 from datetime import datetime
 
+import transformers
 from torch.utils.tensorboard import SummaryWriter
+from transformers import GPT2Model
 
 from extra.optimization.attention import SelfAttention
 
@@ -87,6 +90,7 @@ class State:
       if math.isinf(self.handcoded_tm):
         print("HANDCODED ERROR")
     return self.base_tm
+
   def reward(self):
     failed = False
     assert self.base_tm is not None
@@ -190,12 +194,20 @@ class Representation(nn.Module):
     self.embed_dim = 512
     self.pos_dim = 32
 
-    self.embed_obs = torch.nn.Linear(input_dim+self.pos_dim, self.embed_dim) # might want to add selfattention here
-    R = get_sinusoid_pos_encoding(self.total_len, self.pos_dim)
-    self.R = torch.flip(R, dims=(0,)).to(device)
-    num_heads = 8
-    self.w_r = nn.Linear(self.pos_dim, self.pos_dim, bias=False)
-    self.transformer_model = SelfAttention(num_heads, embed_dimension=self.embed_dim, dropout=0.1)
+    self.embed_obs = torch.nn.Linear(input_dim, self.embed_dim) # might want to add selfattention here
+    self.embed_obs_end = torch.nn.Linear(self.embed_dim, self.embed_dim) # might want to add selfattention here
+    self.embed_ln = nn.LayerNorm(self.embed_dim)
+    # looking at https://github.com/kzl/decision-transformer/blob/master/gym/decision_transformer/models/decision_transformer.py
+    # R = get_sinusoid_pos_encoding(self.total_len, self.pos_dim)
+    # self.R = torch.flip(R, dims=(0,)).to(device)
+    self.embed_timestep = nn.Embedding(self.total_len, self.embed_dim)
+    # self.embed_timesteps = nn.Linear(self.pos_dim, self.pos_dim, bias=False)
+    config = transformers.GPT2Config(
+      vocab_size=1,  # doesn't matter -- we don't use the vocab
+      n_embd=self.embed_dim,
+      n_head=4
+    )
+    self.transformer_model = GPT2Model(config)
     self.skip = torch.nn.Linear(input_dim, width)
     self.skip2 = torch.nn.Linear(width, output_dim)
     self.layer1 = torch.nn.Linear(self.embed_dim if use_transformer else input_dim, width)
@@ -213,35 +225,42 @@ class Representation(nn.Module):
     # hist_x = hist_x[-steps:] # the history was stacked first. But we don't want the stacked frames. HACKKYY
     # could try to just use all hist??
     batch_num = hist_x.shape[0]
+    seq_len = hist_x.shape[1]
     # position embedding:
-    full_r = self.w_r(self.R).expand(batch_num, self.total_len, self.pos_dim)
-    r = full_r # this probably has to change with bigger length
-    # r = torch.zeros_like(full_r)
+    # time_embedding = self.embed_timesteps(self.R).expand(batch_num, self.total_len, self.pos_dim)
+    time_embedding = self.embed_timestep(torch.arange(self.total_len).to(device)).expand(batch_num, self.total_len, self.embed_dim)
+    r = time_embedding # this probably has to change with bigger length
+    # r = torch.zeros_like(time_embedding)
     # for i in range(batch_num):
-    #   r[i, -steps[i]:] = full_r[i,:steps[i]]# full_r is the pos embedding from 0 to seq_len. However since we mask it partially we need to move it
-    embed_x = self.embed_obs(torch.cat((hist_x, r), dim=-1)) # could also sum instead of cat (see gpt2.py)
+    #   r[i, -steps[i]:] = time_embedding[i,:steps[i]]# time_embedding is the pos embedding from 0 to seq_len. However since we mask it partially we need to move it
+    embed_x = self.embed_obs(hist_x)
+    embed_x = F.relu(self.embed_obs_end(embed_x))+time_embedding
+    # embed_x += time_embedding
+    embed_x = self.embed_ln(embed_x)
     # start_pos = self.seq_len - steps
-    mask = torch.full((batch_num, 1, self.total_len, self.total_len), float("-inf"), device=device)
+    # mask = torch.full((batch_num, 1, self.total_len, self.total_len), float("-inf"), device=device)
+    # 1. is attend 0. is mask
+    mask = torch.full((batch_num, self.total_len), 0., device=device, dtype=torch.long)
     for i in range(batch_num):
-      mask[i] = mask[i].triu(last_pos[i]+1)
-    if use_transformer:
-      out_transformer = self.transformer_model(embed_x, mask=mask)
-      out_transformer = out_transformer[:, -1] # get last output
+      mask[i,:last_pos[i]] = 1
 
     last_obs = torch.empty((batch_num, self.input_dim)).to(device)
     for i in range(batch_num):
       last_obs[i] = hist_x[i, last_pos[i]]
     s = F.relu(self.skip(last_obs))
-    s = F.relu(self.skip2(s))
-    if not use_transformer:
+    s = self.skip2(s)
+    if use_transformer:
+      # out_transformer = self.transformer_model(embed_x, mask=mask)
+      out_transformer = self.transformer_model(inputs_embeds=embed_x, attention_mask=mask)
+      out_transformer = out_transformer['last_hidden_state'][:, -1] # get last output
+    else:
       out_transformer = last_obs
     x = F.relu(self.layer1(out_transformer))
     x = F.relu(self.layer2(x))
-    # x = self.layer3(x)
-    # x = torch.nn.functional.relu(x)
+    # x = F.relu(self.layer3(x))
     # x = self.layer4(x)
     # x = torch.nn.functional.relu(x)
-    x = F.relu(self.layer5(x))
+    x = self.layer5(x)
     x = F.relu(x + s)
     assert torch.isfinite(x).all()
     x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
@@ -408,7 +427,7 @@ class Agent(nn.Module):
     self.representation_network = Representation(state_dim, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
-    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-3, weight_decay=1e-4)
+    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
     self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=episode_nums, end_learning_rate=0.0000)
     self.to(device)
 
@@ -416,7 +435,6 @@ class Agent(nn.Module):
     self.action_replay = []
     self.P_replay = []
     self.r_replay = []
-    self.ast_strs = load_worlds()
 
     self.action_space = action_dim
     self.env = None
@@ -437,9 +455,9 @@ class Agent(nn.Module):
     """
     # state = self.env#.reset()no reset for now
     if ast_num is None:
-      ast_num = np.random.choice(first_ast_nums)
+      ast_num = np.random.choice(first_ast_nums_correct)
     # print('running astnum', ast_num)
-    self.env = State(self.ast_strs, ast_num)
+    self.env = State(ast_strs, ast_num)
     base_tm = self.env.set_base_tm()
     state = self.env.feature()
     state_dim = len(state)
@@ -479,19 +497,11 @@ class Agent(nn.Module):
       action_traj.append(action)
       P_traj.append(P.cpu().numpy())
       r_traj.append(r)
-      # print('action', action,'step reward', r, 'done', done)
-      # game_score += r
 
       ## For fix lunarlander-v2 env does not return reward -100 when 'TimeLimit.truncated'
       if done:
-        # if (info['TimeLimit.truncated'] == True) and abs(r) != 100:
-        #   game_score -= 100
-        #   self.r_traj[-1] = -100
-        #   r = -100
         last_frame = i
         break
-
-    # print('self_play: score, r, done, info, lastframe', int(game_score), r, done, info, i)
 
     # for update inference over trajectory length
     for _ in range(unroll_steps):
@@ -509,7 +519,7 @@ class Agent(nn.Module):
 
     game_score = (base_tm - self.env.last_tm) / base_tm
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
-    base_to_beam = (base_tm - beam_results[ast_num]) / base_tm
+    base_to_beam = ((base_tm - beam_results[ast_num]) / base_tm) if beam else None
     return game_score, base_to_handcoded, base_to_beam, r, last_frame, ast_num
 
   def update_weights_mu(self, target:Target):
@@ -732,16 +742,34 @@ device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('
 score_arr = []
 score_arr_handcoded = []
 
+ast_strs = load_worlds()
+random.shuffle(ast_strs)
+
+first_ast_nums_correct = list(range(20))
+# for i in deepcopy(first_ast_nums_correct):
+#   try:
+#     env = State(ast_strs, i)
+#     env.set_base_tm()
+#
+#     print(i)
+#   except:
+#     print('removing astnum', i)
+#     del env
+#     del first_ast_nums_correct[i]
+first_ast_nums = len(first_ast_nums_correct)
+time.sleep(5)
 num_replays = 64
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 num_state_stack = MAX_DIMS
-first_ast_nums = 2
-train_updates = 30
-episodes_per_train_update = 5
-episodes_per_eval = 5
-start_training_epoch = 5 # todo set higher
-use_transformer = False
+
+test_size = 5
+train_updates = 2
+episodes_per_train_update = 1
+episodes_per_eval = 30
+start_training_epoch = 10 # todo set higher
+assert start_training_epoch >= episodes_per_train_update
+use_transformer = True
 alpha_target = 0.05 # 5% new to target
 
 regularizer_multiplier = 1 # was 5 but that seems very high
@@ -749,14 +777,15 @@ regularizer_multiplier = 1 # was 5 but that seems very high
 lookahead_samples = 16
 lookahead_samples2 = 16 # this is in the unroll
 unroll_steps = 3 # todo cannot be changed at the moment
-ast_strs = load_worlds()
+
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 action_space = env.action_length()
-episode_nums = 1000
+episode_nums = 2000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
-exp_str = 'test_no_transformer_'+timing_str # 1,
+# exp_str = 'test_no_transformer_'+timing_str # 1,
+exp_str = 'test_new_transformer_less_training_updates'+timing_str # 1,
 del env
 target = Target(observation_space[0], action_space, 256)
 target.eval()
@@ -776,40 +805,41 @@ beam_results = []
 beams = 8
 # beam search 4 takes [39 and 5] for 2 ast nums
 # beam search 8 takes [94,9,17, 91]
-
-
-for i in range(first_ast_nums):
-  st = time.perf_counter()
-  lin = ast_str_to_lin(ast_strs[i])
-  rawbufs = bufs_from_lin(lin)
-  key = str((lin.ast, beams))
-  if key in global_db:
-    for ao in global_db[key]:
-      lin.apply_opt(ao)
-  else:
-    print("running beam search for num", i)
-    lin = beam_search(lin, rawbufs, beams)
-    global_db[key] = lin.applied_opts
-  tm = time_linearizer(lin, rawbufs, should_copy=False)
-  beam_results.append(tm)
-  print('beam result', tm, 'time', time.perf_counter() - st)
+beam = False
+if beam:
+  for i in range(first_ast_nums):
+    st = time.perf_counter()
+    lin = ast_str_to_lin(ast_strs[i])
+    rawbufs = bufs_from_lin(lin)
+    key = str((lin.ast, beams))
+    if key in global_db:
+      for ao in global_db[key]:
+        lin.apply_opt(ao)
+    else:
+      print("running beam search for num", i)
+      lin = beam_search(lin, rawbufs, beams)
+      global_db[key] = lin.applied_opts
+    tm = time_linearizer(lin, rawbufs, should_copy=False)
+    beam_results.append(tm)
+    print('beam result', tm, 'time', time.perf_counter() - st)
 ## Self play & Weight update loop
 for i in range(episode_nums):
   writer = SummaryWriter(log_dir=f'scalar{exp_str}/')
   global_i = i
   game_score, base_to_handcoded, base_to_beam, last_r, frame, ast_num = agent.self_play_mu(target)
   more_than_handcoded = game_score - base_to_handcoded
-  if best_ast_num_scores[ast_num] < game_score:
-    best_ast_num_scores[ast_num] = game_score
-  if handcoded_best_ast_num_scores[ast_num] == 0.:
-    handcoded_best_ast_num_scores[ast_num] = base_to_handcoded
+  ast_num_i = first_ast_nums_correct.index(ast_num)
+  if best_ast_num_scores[ast_num_i] < game_score:
+    best_ast_num_scores[ast_num_i] = game_score
+  if handcoded_best_ast_num_scores[ast_num_i] == 0.:
+    handcoded_best_ast_num_scores[ast_num_i] = base_to_handcoded
 
   print(f'steps done {frame}. relative speed score {game_score:.2f} relative % more than handcoded {more_than_handcoded:.2f} iteration {global_i}')
   # diff_best_handcoded = best_ast_num_scores - handcoded_best_ast_num_scores
   # print('Diff with best handcoded scores for each ast num', (diff_best_handcoded).round(2).tolist())
   # print('mean diff', diff_best_handcoded.mean().round(2).tolist())
-  # writer.add_scalar('relative_to_base_score', game_score, global_i)
-  # writer.add_scalar('more_than_handcoded', more_than_handcoded, global_i)
+  writer.add_scalar('relative_to_base_score', game_score, global_i)
+  writer.add_scalar('more_than_handcoded', more_than_handcoded, global_i)
   # writer.add_scalar('diff_to_best_handcoded', diff_best_handcoded.mean(), global_i)
 
   score_arr.append(game_score)
@@ -834,21 +864,33 @@ for i in range(episode_nums):
     mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
     more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i+1]))
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
-    scores = []
-    for i in range(first_ast_nums):
+    scores,test_scores = [],[]
+    for i in first_ast_nums_correct[:-test_size]: # eval
       game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
       more_than_handcoded = game_score - base_to_handcoded
-      more_than_beam = game_score - base_to_beam
+      if beam:
+        more_than_beam = game_score - base_to_beam
 
       scores.append([game_score, more_than_handcoded, base_to_beam])
-    scores = np.array(scores)
-    writer.add_scalar('eval/relative_to_base_score', scores[:,0].mean(), global_i)
-    writer.add_scalar('eval/more_than_handcoded', scores[:,1].mean(), global_i)
-    writer.add_scalar('eval/more_than_beam', scores[:,2].mean(), global_i)
+    for i in first_ast_nums_correct[-test_size:]: # eval
+      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
+      more_than_handcoded = game_score - base_to_handcoded
+      if beam:
+        more_than_beam = game_score - base_to_beam
 
-    print('eval relative_to_base_score', scores[:,0])
-    print('eval more_than_handcoded', scores[:,1])
-    print('eval more_than_beam', scores[:,2])
+      test_scores.append([game_score, more_than_handcoded, base_to_beam])
+    scores = np.array(scores)
+    writer.add_scalar('eval_train/relative_to_base_score', scores[:,0].mean(), global_i)
+    writer.add_scalar('eval_train/more_than_handcoded', scores[:,1].mean(), global_i)
+    # writer.add_scalar('eval_train/more_than_beam', scores[:,2].mean(), global_i)
+
+    writer.add_scalar('eval_test/relative_to_base_score', scores[:,0].mean(), global_i)
+    writer.add_scalar('eval_test/more_than_handcoded', scores[:,1].mean(), global_i)
+    # writer.add_scalar('eval_test/more_than_beam', scores[:,2].mean(), global_i)
+
+    # print('eval relative_to_base_score', scores[:,0].round(2))
+    # print('eval more_than_handcoded', scores[:,1].round(2))
+    # print('eval more_than_beam', scores[:,2].round(2))
   # writer.close()
 
 torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
