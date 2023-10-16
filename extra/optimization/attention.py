@@ -18,11 +18,11 @@ class SelfAttention(nn.Module):
     self.embed_dimension = embed_dimension
     # Perform causal masking
     self.is_causal = is_causal
+    self.layer_norm = nn.LayerNorm(embed_dimension)
 
-  def forward(self, x):
+  def forward(self, x, mask):
     # calculate query, key, values for all heads in batch and move head forward to be the batch dim
     query_projected = self.c_attn(x)
-    print(query_projected.shape)
     batch_size = query_projected.size(0)
     embed_dim = query_projected.size(2)
     head_dim = embed_dim // (self.num_heads * 3)
@@ -39,8 +39,8 @@ class SelfAttention(nn.Module):
       dropout = 0.0
       is_causal = False
 
-    y = F.scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=dropout, is_causal=is_causal)
+    y = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=dropout, is_causal=is_causal)
     y = y.transpose(1, 2).view(batch_size, -1, self.num_heads * head_dim)
 
     y = self.resid_dropout(self.c_proj(y))
-    return y
+    return self.layer_norm(x + y)

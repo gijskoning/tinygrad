@@ -6,7 +6,7 @@ from datetime import datetime
 
 from torch.utils.tensorboard import SummaryWriter
 
-from extra.optimization.transformerxl.model import TransformerXL
+from extra.optimization.attention import SelfAttention
 
 os.environ["GPU"] = '1'
 
@@ -135,7 +135,10 @@ class State:
         return act
       try:
         lin = self._step(act).lin
-        lin_to_feats(lin) # todo this is temp, it can sometimes raise an error
+        try:
+          lin_to_feats(lin) # todo this is temp, it can sometimes raise an error
+        except IndexError as e:
+          print('index error', e)
         up, lcl = 1, 1
         try:
           for s, c in zip(lin.full_shape, lin.colors()):
@@ -143,11 +146,8 @@ class State:
             if c in {"cyan", "green", "white"}: lcl *= s
           if up <= 256 and lcl <= 256:
             return act
-        except AssertionError as e:
+        except (AssertionError, IndexError) as e:
           print('asset or index error', e)
-        except IndexError as e:
-          print('index error', e)
-          # print("exception at color", e)
       except AssertionError as e:
         pass
         # print("exception at step", e)
@@ -157,6 +157,19 @@ class State:
       assert _sum > 0., f'{j, len(probs)}'
       probs = probs / _sum
 
+def get_sinusoid_pos_encoding(total_len, embed_dim):
+    """
+    Standard sinusoid positional encoding method outlined in the original
+    Transformer paper. In this case, we use the encodings not to represent
+    each token's position in a sequence but to represent the distance
+    between two tokens (i.e. as a *relative* positional encoding).
+    """
+    pos = torch.arange(total_len).unsqueeze(1)
+    enc = torch.arange(embed_dim).float()
+    enc = enc.unsqueeze(0).repeat(total_len, 1)
+    enc[:, ::2] = torch.sin(pos / 10000**(2*enc[:, ::2]/embed_dim))
+    enc[:, 1::2] = torch.cos(pos / 10000**(2*enc[:, 1::2]/embed_dim))
+    return enc
 
 class Representation(nn.Module):
   """Representation Network
@@ -173,39 +186,49 @@ class Representation(nn.Module):
     super().__init__()
     self.input_dim = input_dim
 
-    config = TransformerXL.default_config()
-    config.mem_len = 0  # we don't need memory during training for this task
-    # config.seg_len = 2 * seq_len - 1
-    config.seg_len = MAX_DIMS # 16 for now
-    model_dim = 128
-    config.model_dim = model_dim
-    config.embed_dim = 256
-    # config.vocab_size = 128 # not really sure. # todo not used now
-    vocab_size = 256
-    config.vocab_size = vocab_size # aka output layer
+    self.total_len = MAX_DIMS
+    self.embed_dim = 512
+    self.pos_dim = 32
 
-    self.embed_obs = torch.nn.Linear(input_dim, model_dim) # might want to add selfattention here
-    # self.transformer_model = SelfAttention(num_heads=8, embed_dimension=embed_dimension, bias=False, is_causal=False, dropout=0.0)
-    # self.transformer_model = nn.TransformerEncoder
-    self.transformer_model = TransformerXL(config, device)
+    self.embed_obs = torch.nn.Linear(input_dim+self.pos_dim, self.embed_dim) # might want to add selfattention here
+    R = get_sinusoid_pos_encoding(self.total_len, self.pos_dim)
+    self.R = torch.flip(R, dims=(0,)).to(device)
+    num_heads = 4
+    self.w_r = nn.Linear(self.pos_dim, self.pos_dim, bias=False)
+    self.transformer_model = SelfAttention(num_heads, embed_dimension=self.embed_dim, dropout=0.1)
     self.skip = torch.nn.Linear(input_dim, output_dim)
-    self.layer1 = torch.nn.Linear(vocab_size, width)
+    self.layer1 = torch.nn.Linear(self.embed_dim, width)
     self.layer2 = torch.nn.Linear(width, width)
     # self.layer3 = torch.nn.Linear(width, width)
     # self.layer4 = torch.nn.Linear(width, width)
     self.layer5 = torch.nn.Linear(width, output_dim)
 
-  def forward(self, hist_x, steps=None):
-
+  def forward(self, hist_x, end_pos=None):
+    # hist_x is sorted such that the first element is the oldest
     # x: stacked obs
     hist_x = hist_x.reshape(-1, num_state_stack, self.input_dim) # batch, num_seqs, dim
     # hist_x = hist_x[-steps:] # the history was stacked first. But we don't want the stacked frames. HACKKYY
     # could try to just use all hist??
-    embed_x = self.embed_obs(hist_x)
-    out_transformer = self.transformer_model(embed_x).squeeze()
-    last_obs = hist_x[0,-1]
+    batch_num = hist_x.shape[0]
+    # position embedding:
+    full_r = self.w_r(self.R).expand(batch_num, self.total_len, self.pos_dim)
+    r = full_r # this probably has to change with bigger length
+    # r = torch.zeros_like(full_r)
+    # for i in range(batch_num):
+    #   r[i, -steps[i]:] = full_r[i,:steps[i]]# full_r is the pos embedding from 0 to seq_len. However since we mask it partially we need to move it
+    embed_x = self.embed_obs(torch.cat((hist_x, r), dim=-1)) # could also sum instead of cat (see gpt2.py)
+    # start_pos = self.seq_len - steps
+    mask = torch.full((batch_num, 1, self.total_len, self.total_len), float("-inf"), device=device)
+    for i in range(batch_num):
+      mask[i] = mask[i].triu(end_pos[i])
+
+    out_transformer = self.transformer_model(embed_x, mask=mask)
+    out_transformer = out_transformer[:, -1] # get last output
+    # do we need softmax??
+    last_obs = hist_x[:,0]
     s = self.skip(last_obs)
     x = self.layer1(out_transformer)
+
     x = torch.nn.functional.relu(x)
     x = self.layer2(x)
     x = torch.nn.functional.relu(x)
@@ -215,8 +238,10 @@ class Representation(nn.Module):
     # x = torch.nn.functional.relu(x)
     x = self.layer5(x)
     x = torch.nn.functional.relu(x + s)
+    assert torch.isfinite(x).all()
     x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
-    return x
+    assert torch.isfinite(x).all()
+    return x.squeeze()
 
 
 class Dynamics(nn.Module):
@@ -378,7 +403,7 @@ class Agent(nn.Module):
     self.representation_network = Representation(state_dim, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
-    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
+    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-3, weight_decay=1e-4)
     self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=episode_nums, end_learning_rate=0.0000)
     self.to(device)
 
@@ -397,7 +422,7 @@ class Agent(nn.Module):
     self.var_m = [0 for _ in range(unroll_steps)]
     self.beta_product_m = [1.0 for _ in range(unroll_steps)]
 
-  def self_play_mu(self, target, ast_num=None, eval=False, max_timestep=10000):
+  def self_play_mu(self, target:Target, ast_num=None, eval=False, max_timestep=10000):
     """Self-play and save trajectory to replay buffer
 
     (Originally target network used to inference policy, but i used agent network instead) # todo
@@ -414,17 +439,16 @@ class Agent(nn.Module):
     state = self.env.feature()
     state_dim = len(state)
     state_traj, action_traj, P_traj, r_traj = [], [], [], []
-    for i in range(max_timestep):
+    for i in range(MAX_DIMS):
       start_state = state
       if num_state_stack == 1:
         stacked_state = state
       else:
         if i == 0:
-          # stacked_state = np.concatenate((state, state, state, state, state, state, state, state), axis=0)
           stacked_state = np.concatenate(tuple(state for _ in range(num_state_stack)), axis=0) # for now just stack 2
         else:
-          stacked_state = np.roll(stacked_state, -state_dim, axis=0)
-          stacked_state[-state_dim:] = state
+          # stacked_state = np.roll(stacked_state, state_dim, axis=0)
+          stacked_state[state_dim*i:state_dim*(i+1)] = state
       # it combines all observations into one transformer model I think one could see it as the representation network
       # to add to observation
       # https://arxiv.org/pdf/2301.07608.pdf
@@ -433,10 +457,10 @@ class Agent(nn.Module):
       # reward previous step 1
       # should add:
       # basetiming to state
-      #
       with torch.no_grad():
         # st = time.perf_counter()
-        hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device))
+        steps = i+1
+        hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device), end_pos=np.array([steps]))
         # print('time for representation', time.perf_counter() - st)
         P, v = target.prediction_network(hs)
       probs = P.detach().cpu().numpy()
@@ -498,7 +522,7 @@ class Agent(nn.Module):
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
     for _ in range(train_updates):
-      state_traj_seq_length = []
+      state_traj_i = []
       state_traj = []
       action_traj = []
       P_traj = []
@@ -519,13 +543,13 @@ class Agent(nn.Module):
           G_arr.append(G)
         G_arr.reverse()
         for i in np.random.randint(len(self.state_replay[sel]) - unroll_steps - (num_state_stack - 1), size=seq_in_replay):
-          state_traj_seq_length.append(len(self.state_replay[sel])- (num_state_stack))
+          state_traj_i.append(i)
           state_traj.append(self.state_replay[sel][i:i + unroll_steps + num_state_stack])
           action_traj.append(self.action_replay[sel][i:i + unroll_steps])
           r_traj.append(self.r_replay[sel][i:i + unroll_steps])
           G_arr_mb.append(G_arr[i:i + unroll_steps + 1])
           P_traj.append(self.P_replay[sel][i])
-
+      state_traj_i = np.array(state_traj_i)
       state_traj = torch.from_numpy(np.array(state_traj)).to(device)
       action_traj = torch.from_numpy(np.array(action_traj)).unsqueeze(2).to(device)
       P_traj = torch.from_numpy(np.array(P_traj)).to(device)
@@ -542,7 +566,7 @@ class Agent(nn.Module):
       r_logits_s = []
       for i in range(1+unroll_steps):
         if i == 0:
-          hs = self.representation_network(stacked_state_0, steps=1)
+          hs = self.representation_network(stacked_state_0, end_pos=state_traj_i+1)
         else:
           hs, r_logits = self.dynamics_network(hs, action_traj[:, i-1])
           r_logits_s.append(r_logits)
@@ -555,7 +579,7 @@ class Agent(nn.Module):
 
       ## target network inference
       with torch.no_grad():
-        t_first_hs = target.representation_network(stacked_state_0)
+        t_first_hs = target.representation_network(stacked_state_0, end_pos=state_traj_i+1)
         t_first_P, t_first_v_logits = target.prediction_network(t_first_hs)
 
         ## normalized advantage
@@ -613,7 +637,7 @@ class Agent(nn.Module):
       for i in range(unroll_steps):
         stacked_state = torch.cat(tuple(state_traj[:, i + j+1] for j in range(num_state_stack)), dim=1)
         with torch.no_grad():
-          t_hs = target.representation_network(stacked_state)
+          t_hs = target.representation_network(stacked_state, end_pos=state_traj_i+1+i)
           t_P, t_v_logits = target.prediction_network(t_hs)
 
         beta_var = 0.99
@@ -691,13 +715,11 @@ class Agent(nn.Module):
 
     self.scheduler.step()
 
-    writer.add_scalars('Loss', {'L_total': L_total.mean(),
-                                'L_pg_cmpo': L_pg_cmpo.mean(),
-                                'L_v': (L_v / (unroll_steps+1) / 4).mean(),
-                                'L_r': (L_r / unroll_steps / 1).mean(),
-                                'L_m': (L_m).mean()
-                                }, global_i)
-    #
+    writer.add_scalar('Loss/L_total', L_total.mean(), global_i)
+    writer.add_scalar('Loss/L_pg_cmpo', L_pg_cmpo.mean(), global_i)
+    writer.add_scalar('Loss/L_v', (L_v / (unroll_steps+1) / 4).mean(), global_i)
+    writer.add_scalar('Loss/L_r', (L_r / unroll_steps / 1).mean(), global_i)
+    writer.add_scalar('Loss/L_m', (L_m).mean(), global_i)
     writer.add_scalars('vars', {'self.var': self.var,
                                 'self.var_m': self.var_m[0]
                                 }, global_i)
@@ -710,7 +732,7 @@ num_replays = 64
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 num_state_stack = MAX_DIMS
-first_ast_nums = 4
+first_ast_nums = 2
 train_updates = 30
 episodes_per_train_update = 5
 episodes_per_eval = 5
@@ -726,12 +748,13 @@ ast_strs = load_worlds()
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 action_space = env.action_length()
-episode_nums = 10000
+episode_nums = 1000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
 exp_str = 'test_'+timing_str # 1,
 del env
 target = Target(observation_space[0], action_space, 256)
+target.eval()
 agent = Agent(observation_space[0], action_space, 256)
 # target = Target(env.observation_space.shape[0], env.action_space.n, 128)
 # agent = Agent(env.observation_space.shape[0], env.action_space.n, 128)
