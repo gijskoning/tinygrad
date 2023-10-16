@@ -6,6 +6,8 @@ from datetime import datetime
 
 from torch.utils.tensorboard import SummaryWriter
 
+from extra.optimization.transformerxl.model import TransformerXL
+
 os.environ["GPU"] = '1'
 
 import math
@@ -105,11 +107,17 @@ class State:
     return failed, self._reward
 
   def feature(self):
-    return np.asarray(lin_to_feats(self.lin)).astype(np.float32)
+    assert self.base_tm is not None
+    tm_reward = 0.
+    if self._reward is not None:
+      tm_reward = self._reward
+    feats = lin_to_feats(self.lin)+[tm_reward, self.base_tm]
+    return np.asarray(feats).astype(np.float32)
 
   @staticmethod
   def feature_shape():
-    return (1021,)
+    # +1 for reward
+    return (1021+1+1,)
 
   @staticmethod
   def action_length():
@@ -135,8 +143,10 @@ class State:
             if c in {"cyan", "green", "white"}: lcl *= s
           if up <= 256 and lcl <= 256:
             return act
-        except (IndexError, AssertionError) as e:
+        except AssertionError as e:
           print('asset or index error', e)
+        except IndexError as e:
+          print('index error', e)
           # print("exception at color", e)
       except AssertionError as e:
         pass
@@ -146,6 +156,7 @@ class State:
       _sum = probs.sum()
       assert _sum > 0., f'{j, len(probs)}'
       probs = probs / _sum
+
 
 class Representation(nn.Module):
   """Representation Network
@@ -160,23 +171,48 @@ class Representation(nn.Module):
 
   def __init__(self, input_dim, output_dim, width):
     super().__init__()
+    self.input_dim = input_dim
+
+    config = TransformerXL.default_config()
+    config.mem_len = 0  # we don't need memory during training for this task
+    # config.seg_len = 2 * seq_len - 1
+    config.seg_len = MAX_DIMS # 16 for now
+    model_dim = 128
+    config.model_dim = model_dim
+    config.embed_dim = 256
+    # config.vocab_size = 128 # not really sure. # todo not used now
+    vocab_size = 256
+    config.vocab_size = vocab_size # aka output layer
+
+    self.embed_obs = torch.nn.Linear(input_dim, model_dim) # might want to add selfattention here
+    # self.transformer_model = SelfAttention(num_heads=8, embed_dimension=embed_dimension, bias=False, is_causal=False, dropout=0.0)
+    # self.transformer_model = nn.TransformerEncoder
+    self.transformer_model = TransformerXL(config, device)
     self.skip = torch.nn.Linear(input_dim, output_dim)
-    self.layer1 = torch.nn.Linear(input_dim, width)
+    self.layer1 = torch.nn.Linear(vocab_size, width)
     self.layer2 = torch.nn.Linear(width, width)
-    self.layer3 = torch.nn.Linear(width, width)
-    self.layer4 = torch.nn.Linear(width, width)
+    # self.layer3 = torch.nn.Linear(width, width)
+    # self.layer4 = torch.nn.Linear(width, width)
     self.layer5 = torch.nn.Linear(width, output_dim)
 
-  def forward(self, x):
-    s = self.skip(x)
-    x = self.layer1(x)
+  def forward(self, hist_x, steps=None):
+
+    # x: stacked obs
+    hist_x = hist_x.reshape(-1, num_state_stack, self.input_dim) # batch, num_seqs, dim
+    # hist_x = hist_x[-steps:] # the history was stacked first. But we don't want the stacked frames. HACKKYY
+    # could try to just use all hist??
+    embed_x = self.embed_obs(hist_x)
+    out_transformer = self.transformer_model(embed_x).squeeze()
+    last_obs = hist_x[0,-1]
+    s = self.skip(last_obs)
+    x = self.layer1(out_transformer)
     x = torch.nn.functional.relu(x)
     x = self.layer2(x)
     x = torch.nn.functional.relu(x)
-    x = self.layer3(x)
-    x = torch.nn.functional.relu(x)
-    x = self.layer4(x)
-    x = torch.nn.functional.relu(x)
+    # x = self.layer3(x)
+    # x = torch.nn.functional.relu(x)
+    # x = self.layer4(x)
+    # x = torch.nn.functional.relu(x)
     x = self.layer5(x)
     x = torch.nn.functional.relu(x + s)
     x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
@@ -326,7 +362,8 @@ class Target(nn.Module):
 
   def __init__(self, state_dim, action_dim, width):
     super().__init__()
-    self.representation_network = Representation(state_dim * num_state_stack, state_dim * 4, width)
+    # self.representation_network = Representation(state_dim * num_state_stack, state_dim * 4, width)
+    self.representation_network = Representation(state_dim, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
     self.to(device)
@@ -338,7 +375,7 @@ class Agent(nn.Module):
 
   def __init__(self, state_dim, action_dim, width):
     super().__init__()
-    self.representation_network = Representation(state_dim * num_state_stack, state_dim * 4, width)
+    self.representation_network = Representation(state_dim, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
     self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
@@ -388,9 +425,19 @@ class Agent(nn.Module):
         else:
           stacked_state = np.roll(stacked_state, -state_dim, axis=0)
           stacked_state[-state_dim:] = state
-
+      # it combines all observations into one transformer model I think one could see it as the representation network
+      # to add to observation
+      # https://arxiv.org/pdf/2301.07608.pdf
+      # name, dim
+      # TRIALS REMAINING 5 # one hot. so max of 5 trials for example
+      # reward previous step 1
+      # should add:
+      # basetiming to state
+      #
       with torch.no_grad():
+        # st = time.perf_counter()
         hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device))
+        # print('time for representation', time.perf_counter() - st)
         P, v = target.prediction_network(hs)
       probs = P.detach().cpu().numpy()
       action = self.env.get_valid_action(probs, select_best=eval)
@@ -451,6 +498,7 @@ class Agent(nn.Module):
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
     for _ in range(train_updates):
+      state_traj_seq_length = []
       state_traj = []
       action_traj = []
       P_traj = []
@@ -471,6 +519,7 @@ class Agent(nn.Module):
           G_arr.append(G)
         G_arr.reverse()
         for i in np.random.randint(len(self.state_replay[sel]) - unroll_steps - (num_state_stack - 1), size=seq_in_replay):
+          state_traj_seq_length.append(len(self.state_replay[sel])- (num_state_stack))
           state_traj.append(self.state_replay[sel][i:i + unroll_steps + num_state_stack])
           action_traj.append(self.action_replay[sel][i:i + unroll_steps])
           r_traj.append(self.r_replay[sel][i:i + unroll_steps])
@@ -493,7 +542,7 @@ class Agent(nn.Module):
       r_logits_s = []
       for i in range(1+unroll_steps):
         if i == 0:
-          hs = self.representation_network(stacked_state_0)
+          hs = self.representation_network(stacked_state_0, steps=1)
         else:
           hs, r_logits = self.dynamics_network(hs, action_traj[:, i-1])
           r_logits_s.append(r_logits)
@@ -660,10 +709,12 @@ score_arr_handcoded = []
 num_replays = 64
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
-num_state_stack = 1
+num_state_stack = MAX_DIMS
 first_ast_nums = 4
 train_updates = 30
 episodes_per_train_update = 5
+episodes_per_eval = 5
+start_training_epoch = 5 # todo set higher
 alpha_target = 0.05 # 5% new to target
 
 regularizer_multiplier = 1 # was 5 but that seems very high
@@ -671,14 +722,14 @@ regularizer_multiplier = 1 # was 5 but that seems very high
 lookahead_samples = 16
 lookahead_samples2 = 16 # this is in the unroll
 unroll_steps = 3 # todo cannot be changed at the moment
-start_training_epoch = 10
 ast_strs = load_worlds()
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 action_space = env.action_length()
 episode_nums = 10000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-exp_str = '4_'+timing_str # 1,
+# exp_str = 'test_'+timing_str # 1,
+exp_str = 'test_'+timing_str # 1,
 del env
 target = Target(observation_space[0], action_space, 256)
 agent = Agent(observation_space[0], action_space, 256)
@@ -698,11 +749,7 @@ beams = 8
 # beam search 4 takes [39 and 5] for 2 ast nums
 # beam search 8 takes [94,9,17, 91]
 
-# to add to observation
-# https://arxiv.org/pdf/2301.07608.pdf
-# name, dim
-# TRIALS REMAINING 5 # one hot. so max of 5 trials for example
-# reward previous step 1
+
 for i in range(first_ast_nums):
   st = time.perf_counter()
   lin = ast_str_to_lin(ast_strs[i])
@@ -752,7 +799,7 @@ for i in range(episode_nums):
     agent.update_weights_mu(target)
     print("Done update")
 
-  if i % 10 == 0 and i >= start_training_epoch:
+  if i % episodes_per_eval == 0 and i >= start_training_epoch:
     print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
     best_score_related_to_handcoded = (best_ast_num_scores-handcoded_best_ast_num_scores)[best_ast_num_scores != 0.]
     writer.add_scalar('best_found_score_related_to_handcoded', best_score_related_to_handcoded.mean(), global_i)
@@ -778,3 +825,4 @@ for i in range(episode_nums):
 
 torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
 agent.env.close()
+# python -m tensorboard.main --logdir optimization
