@@ -1,6 +1,7 @@
 import functools
 import os
 import time
+from datetime import datetime
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -39,15 +40,10 @@ class State:
 
   def __init__(self, ast_strs, ast_num):
     self.ast_str = ast_strs[ast_num]
-    # print('ast_str',ast_str)
-    # exit()
     self.original_lin = ast_str_to_lin(self.ast_str)  # debug single ast
     self.tm = self.last_tm = self.base_tm = None
     self.handcoded_tm = None
-    # self.rawbufs = bufs_from_lin(self.original_lin)
-    # rawbufs = bufs_from_lin(self.original_lin)
     self.lin = deepcopy(self.original_lin)
-    # print(self.state_lin)
     self.steps = 0
     self.terminal = False
     self._feature = None
@@ -55,14 +51,8 @@ class State:
     self._reward = None
 
   def step(self, act, dense_reward=True) -> Tuple['State', np.ndarray,float,bool, None]:
-    # assert isinstance(act, int), f'act must be int, got {act, type(act)}'
     state = deepcopy(self)
     state._feature = None
-    # state = State(ast_str=self.ast_str)
-    # state.steps = self.steps
-    # state.rawbufs = self.rawbufs
-    # state.state_lin = deepcopy(self.state_lin)
-    # state.tm,state.last_tm,state.base_tm = self.tm,self.last_tm,self.base_tm
 
     state.steps += 1
     state.terminal = state.steps == MAX_DIMS - 1 or act == 0
@@ -73,8 +63,6 @@ class State:
     state.lin.apply_opt(search.actions[act - 1])
     state._reward = None
 
-    # state.state_lin =
-    # return state
     if dense_reward:
       state.failed, r = state.reward()
     else:
@@ -90,10 +78,7 @@ class State:
 
   def set_base_tm(self):
     if self.base_tm is None:
-      # rawbufs = bufs_from_lin(self.original_lin)
-      # self.last_tm = self.base_tm = time_linearizer(self.original_lin, rawbufs)
-      st = time.perf_counter()
-      tm,self.handcoded_tm = get_tm_cached(self.ast_str)
+      tm, self.handcoded_tm = get_tm_cached(self.ast_str)
       self.last_tm = self.base_tm = tm
       assert not math.isinf(self.last_tm)
       if math.isinf(self.handcoded_tm):
@@ -111,50 +96,31 @@ class State:
         assert not math.isinf(tm)
         self._reward = (self.last_tm - tm)
         self.last_tm = tm
-
-      # time_penalty = ((self.last_tm - tm) / self.base_tm)
-      # reward = ((self.last_tm - tm) / self.base_tm)
-      # reward = (self.last_tm - self.tm)
-      # self.last_tm = self.tm
     except AssertionError as e:
-      # print(e)
       self._reward = -self.base_tm
       failed = True
 
     return failed, self._reward
 
   def feature(self):
-
-    # if self._feature is None:
-    #   self._feature = lin_to_feats(self.lin)
     return np.asarray(lin_to_feats(self.lin)).astype(np.float32)
 
   @staticmethod
   def feature_shape():
     return (1021,)
 
-  # @staticmethod
-  # def action_feature():
-  #   return (1021,)
-
   @staticmethod
   def action_length():
     return len(search.actions) + 1
 
-  # def get_masked_probs(self, p_root):
-  #   # mask valid actions
-  #   # probs = net(Tensor([feat])).exp()[0].numpy()
-  #   valid_action_mask = np.zeros(self.action_length(), dtype=np.float32)
-  #   for x in get_linearizer_actions(self.lin): valid_action_mask[x] = 1
-  #   p_root *= valid_action_mask
-  #   p_root /= sum(p_root)
-  #   return p_root
-
-  def get_valid_action(self, probs):
+  def get_valid_action(self, probs, select_best=False):
     probs = deepcopy(probs)
 
     for j in range(len(probs)):
-      act = np.random.choice(len(probs), p=probs)
+      if select_best:
+        act = np.argmax(probs)
+      else:
+        act = np.random.choice(len(probs), p=probs)
       if act == 0:
         return act
       try:
@@ -168,7 +134,7 @@ class State:
           if up <= 256 and lcl <= 256:
             return act
         except (IndexError, AssertionError) as e:
-          pass
+          print('asset or index error', e)
           # print("exception at color", e)
       except AssertionError as e:
         pass
@@ -300,7 +266,6 @@ class Prediction(nn.Module):
     P = self.policy_head(x)
     P = torch.nn.functional.softmax(P, dim=-1)
     V = self.value_head(x)
-    # print('V', V.cpu().detach().numpy())
     return P, V
 
 
@@ -385,8 +350,7 @@ class Agent(nn.Module):
     self.ast_strs = load_worlds()
 
     self.action_space = action_dim
-    # ast_num = epoch % 10
-    self.env = None#State()#gym.make(game_name)
+    self.env = None
 
     self.var = 0
     self.beta_product = 1.0
@@ -405,6 +369,7 @@ class Agent(nn.Module):
     # state = self.env#.reset()no reset for now
     if ast_num is None:
       ast_num = np.random.choice(first_ast_nums)
+    # print('running astnum', ast_num)
     self.env = State(self.ast_strs, ast_num)
     base_tm = self.env.set_base_tm()
     state = self.env.feature()
@@ -426,7 +391,7 @@ class Agent(nn.Module):
         hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device))
         P, v = target.prediction_network(hs)
       probs = P.detach().cpu().numpy()
-      action = self.env.get_valid_action(probs)
+      action = self.env.get_valid_action(probs, select_best=eval)
       # action = np.random.choice(np.arange(self.action_space), p=P.detach().cpu().numpy())
       self.env, state, r, done, info = self.env.step(action, dense_reward=not eval)
       if i == 0:
@@ -437,7 +402,7 @@ class Agent(nn.Module):
       action_traj.append(action)
       P_traj.append(P.cpu().numpy())
       r_traj.append(r)
-      print('action', action,'step reward', r, 'done', done)
+      # print('action', action,'step reward', r, 'done', done)
       # game_score += r
 
       ## For fix lunarlander-v2 env does not return reward -100 when 'TimeLimit.truncated'
@@ -446,7 +411,6 @@ class Agent(nn.Module):
         #   game_score -= 100
         #   self.r_traj[-1] = -100
         #   r = -100
-        print('steps done', self.env.steps, 'failed', self.env.failed)
         last_frame = i
         break
 
@@ -466,14 +430,6 @@ class Agent(nn.Module):
       self.P_replay.append(P_traj)
       self.r_replay.append(r_traj)
 
-      writer.add_scalars('Selfplay',
-                         {'lastreward': r,
-                          'lastframe': last_frame + 1
-                          }, global_i)
-    print('Selfplay',
-                       {'lastreward': r,
-                        'lastframe': last_frame + 1
-                        }, global_i)
     game_score = (base_tm - self.env.last_tm) / base_tm
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
     return game_score, base_to_handcoded, r, last_frame, ast_num
@@ -739,7 +695,8 @@ seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 num_state_stack = 1
 first_ast_nums = 2
-train_updates = 5
+train_updates = 30
+episodes_per_train_update = 5
 alpha_target = 0.05 # 5% new to target
 
 regularizer_multiplier = 1 # was 5 but that seems very high
@@ -747,13 +704,14 @@ regularizer_multiplier = 1 # was 5 but that seems very high
 lookahead_samples = 16
 lookahead_samples2 = 16 # this is in the unroll
 unroll_steps = 3 # todo cannot be changed at the moment
-start_training_epoch = 5
+start_training_epoch = 10
 ast_strs = load_worlds()
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 action_space = env.action_length()
 episode_nums = 10000
-exp_str = '3' # 1,
+timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+exp_str = '4_'+timing_str # 1,
 del env
 target = Target(observation_space[0], action_space, 256)
 agent = Agent(observation_space[0], action_space, 256)
@@ -777,13 +735,12 @@ for i in range(episode_nums):
   if handcoded_best_ast_num_scores[ast_num] == 0.:
     handcoded_best_ast_num_scores[ast_num] = base_to_handcoded
 
-  print(f'relative speed score {game_score:.4f} relative % more than handcoded {more_than_handcoded:.4f} iteration {global_i}')
-  print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
+  print(f'steps done {frame}. relative speed score {game_score:.2f} relative % more than handcoded {more_than_handcoded:.2f} iteration {global_i}')
   # diff_best_handcoded = best_ast_num_scores - handcoded_best_ast_num_scores
   # print('Diff with best handcoded scores for each ast num', (diff_best_handcoded).round(2).tolist())
   # print('mean diff', diff_best_handcoded.mean().round(2).tolist())
-  writer.add_scalar('relative_to_base_score', game_score, global_i)
-  writer.add_scalar('more_than_handcoded', more_than_handcoded, global_i)
+  # writer.add_scalar('relative_to_base_score', game_score, global_i)
+  # writer.add_scalar('more_than_handcoded', more_than_handcoded, global_i)
   # writer.add_scalar('diff_to_best_handcoded', diff_best_handcoded.mean(), global_i)
 
   score_arr.append(game_score)
@@ -796,19 +753,22 @@ for i in range(episode_nums):
   #   torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
   #   print('Done')
   #   break
-  if i >= start_training_epoch:
+  if i % episodes_per_train_update == 0 and i >= start_training_epoch:
     print("Training update")
     agent.update_weights_mu(target)
     print("Done update")
 
   if i % 10 == 0 and i >= start_training_epoch:
+    print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
+    best_score_related_to_handcoded = (best_ast_num_scores-handcoded_best_ast_num_scores)[best_ast_num_scores != 0.]
+    writer.add_scalar('best_found_score_related_to_handcoded', best_score_related_to_handcoded.mean(), global_i)
     mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
     more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i+1]))
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
     scores = []
     for i in range(first_ast_nums):
       print('eval selfplay')
-      game_score, base_to_handcoded, _, frame, _ = agent.self_play_mu(ast_num=i, eval=True)
+      game_score, base_to_handcoded, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
       more_than_handcoded = game_score - base_to_handcoded
 
       scores.append([game_score, more_than_handcoded])
