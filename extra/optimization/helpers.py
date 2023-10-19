@@ -35,6 +35,7 @@ from tinygrad.shape.symbolic import Node
 
 MAX_DIMS = 16
 MAX_BUFS = 9
+
 def lin_to_feats(lin:Linearizer, use_sts=True):
   assert lin.shape_len < MAX_DIMS, "too many dims"
 
@@ -87,5 +88,5 @@ def lin_to_feats(lin:Linearizer, use_sts=True):
     ret += [0] * (sts_len*(MAX_BUFS - len(my_sts)))
     assert len(ret) == 1021, f"wrong len {len(ret)}"
   else:
-    assert len(ret) == 240, f"wrong len {len(ret)}"
+    assert len(ret) == 274, f"wrong len {len(ret)}"
   return ret

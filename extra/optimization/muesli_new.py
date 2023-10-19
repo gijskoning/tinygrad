@@ -18,6 +18,7 @@ from copy import deepcopy
 from typing import Tuple
 # import matplotlib.pyplot as plt
 import numpy as np
+
 np.seterr(all='raise')
 import torch
 import torch.nn as nn
@@ -31,6 +32,7 @@ from extra.optimization.helpers import MAX_DIMS, ast_str_to_lin, lin_to_feats, l
 from tinygrad.codegen import search
 from tinygrad.codegen.search import beam_search, bufs_from_lin, time_linearizer
 
+
 @functools.lru_cache(None)
 def get_tm_cached(ast_str, handcoded=True):
   lin = ast_str_to_lin(ast_str)
@@ -41,6 +43,7 @@ def get_tm_cached(ast_str, handcoded=True):
     tmhc = time_linearizer(lin, rawbufs)
     return tm, tmhc
   return tm
+
 
 class State:
 
@@ -55,26 +58,39 @@ class State:
     self._feature = None
     self.failed = False
     self._reward = None
+    self.trial = 0
 
-  def step(self, act, dense_reward=True) -> Tuple['State', np.ndarray,float,bool, None]:
+  def step(self, act, dense_reward=True) -> Tuple['State', np.ndarray, float, bool, None]:
     state = deepcopy(self)
     state._feature = None
 
     state.steps += 1
-    state.terminal = state.steps == MAX_DIMS - 1 or act == 0
-    info = None
+    if act == 0:
+      state.trial += 1
+      state.terminal = state.trial == max_trials
+      if not state.terminal:
+        print('resetting trial to', state.trial + 1, 'reward was ', state._reward)
+    state.terminal = state.terminal or state.steps == MAX_DIMS - 1
     if state.terminal:
-      state.failed, r = state.reward()
-      return state, state.feature(), r, state.terminal, info
-    state.lin.apply_opt(search.actions[act - 1])
+      state.failed, r = False, 0.
+      return state, state.feature(), r, state.terminal, None
+
     state._reward = None
+
+    if act == 0:
+      # new trial
+      state.lin = deepcopy(state.original_lin)
+      state.tm = state.last_tm = state.base_tm
+      state.steps = 0
+    else:
+      state.lin.apply_opt(search.actions[act - 1])
 
     if dense_reward:
       state.failed, r = state.reward()
-    else:
+    else:  # todo not really using
       state.failed, r = False, 0.
-    state.terminal = state.terminal and not state.failed
-    return state, state.feature(), r, state.terminal, info
+    state.terminal = state.terminal or state.failed
+    return state, state.feature(), r, state.terminal, None
 
   def _step(self, act):
     state = deepcopy(self)
@@ -108,20 +124,30 @@ class State:
       self._reward = -self.base_tm
       failed = True
 
-    return failed, self._reward
+    return failed, self._reward * 1000
 
   def feature(self):
     assert self.base_tm is not None
     tm_reward = 0.
     if self._reward is not None:
       tm_reward = self._reward
-    feats = lin_to_feats(self.lin)+[tm_reward, self.base_tm]
+    trial_onehot = [0] * max_trials
+    if self.trial == max_trials:
+      trial_onehot[self.trial - 1] = 1
+    else:
+      trial_onehot[self.trial] = 1
+    feats = lin_to_feats(self.lin, use_sts=use_sts) + [tm_reward, self.base_tm] + trial_onehot
     return np.asarray(feats).astype(np.float32)
 
   @staticmethod
   def feature_shape():
-    # +1 for reward
-    return (1021+1+1,)
+    base = State.base_feature_shape()
+    # +1 for reward, base_reward, and max_trial encoding
+    return (base + 1 + 1 + max_trials,)
+
+  @staticmethod
+  def base_feature_shape():
+    return 1021 if use_sts else 274
 
   @staticmethod
   def action_length():
@@ -136,11 +162,11 @@ class State:
       else:
         act = np.random.choice(len(probs), p=probs)
       if act == 0:
-        return act
+        return act, probs
       try:
         lin = self._step(act).lin
         try:
-          lin_to_feats(lin) # todo this is temp, it can sometimes raise an error
+          lin_to_feats(lin, use_sts=use_sts)  # todo this is temp, it can sometimes raise an error
         except IndexError as e:
           print('index error', e)
         up, lcl = 1, 1
@@ -149,7 +175,7 @@ class State:
             if c in {"magenta", "yellow"}: up *= s
             if c in {"cyan", "green", "white"}: lcl *= s
           if up <= 256 and lcl <= 256:
-            return act
+            return act, probs
         except (AssertionError, IndexError) as e:
           print('asset or index error', e)
       except AssertionError as e:
@@ -158,22 +184,28 @@ class State:
 
       probs[act] = 0
       _sum = probs.sum()
-      assert _sum > 0., f'{j, len(probs)}'
+      if _sum == 0:
+        print("not good sum")
+        return 0, probs
+
+        # assert _sum > 0., f'{j, len(probs)}'
       probs = probs / _sum
 
+
 def get_sinusoid_pos_encoding(total_len, embed_dim):
-    """
-    Standard sinusoid positional encoding method outlined in the original
-    Transformer paper. In this case, we use the encodings not to represent
-    each token's position in a sequence but to represent the distance
-    between two tokens (i.e. as a *relative* positional encoding).
-    """
-    pos = torch.arange(total_len).unsqueeze(1)
-    enc = torch.arange(embed_dim).float()
-    enc = enc.unsqueeze(0).repeat(total_len, 1)
-    enc[:, ::2] = torch.sin(pos / 10000**(2*enc[:, ::2]/embed_dim))
-    enc[:, 1::2] = torch.cos(pos / 10000**(2*enc[:, 1::2]/embed_dim))
-    return enc
+  """
+  Standard sinusoid positional encoding method outlined in the original
+  Transformer paper. In this case, we use the encodings not to represent
+  each token's position in a sequence but to represent the distance
+  between two tokens (i.e. as a *relative* positional encoding).
+  """
+  pos = torch.arange(total_len).unsqueeze(1)
+  enc = torch.arange(embed_dim).float()
+  enc = enc.unsqueeze(0).repeat(total_len, 1)
+  enc[:, ::2] = torch.sin(pos / 10000 ** (2 * enc[:, ::2] / embed_dim))
+  enc[:, 1::2] = torch.cos(pos / 10000 ** (2 * enc[:, 1::2] / embed_dim))
+  return enc
+
 
 class Representation(nn.Module):
   """Representation Network
@@ -189,13 +221,21 @@ class Representation(nn.Module):
   def __init__(self, input_dim, output_dim, width):
     super().__init__()
     self.input_dim = input_dim
+    self.first_part_feature = 2
+    self.shape_input_length = State.base_feature_shape() - self.first_part_feature
+    assert self.shape_input_length % MAX_DIMS == 0
+    self.input_per_shape_dim = self.shape_input_length // MAX_DIMS
+    self.total_len = max_episode_length
 
-    self.total_len = MAX_DIMS
+    self.input_inner_dim = 64
     self.embed_dim = 512
     self.pos_dim = 32
 
-    self.embed_obs = torch.nn.Linear(input_dim, self.embed_dim) # might want to add selfattention here
-    self.embed_obs_end = torch.nn.Linear(self.embed_dim, self.embed_dim) # might want to add selfattention here
+    self.embed_shape_dim = torch.nn.Linear(self.input_per_shape_dim, self.input_inner_dim)
+    self.embed_remaining_input = torch.nn.Linear(self.first_part_feature, self.input_inner_dim)
+
+    self.embed_obs = torch.nn.Linear(self.input_inner_dim * MAX_DIMS, self.embed_dim)  # might want to add selfattention here
+    # self.embed_obs_end = torch.nn.Linear(self.embed_dim, self.embed_dim)  # might want to add selfattention here
     self.embed_ln = nn.LayerNorm(self.embed_dim)
     # looking at https://github.com/kzl/decision-transformer/blob/master/gym/decision_transformer/models/decision_transformer.py
     # R = get_sinusoid_pos_encoding(self.total_len, self.pos_dim)
@@ -217,24 +257,30 @@ class Representation(nn.Module):
     self.layer5 = torch.nn.Linear(width, output_dim)
     # if not use_transformer
 
-
   def forward(self, hist_x, last_pos=None):
     # assumes hist_x is orderd in steps [0,1...last_pos, ..., MAX_DIMS-1]
     # x: stacked obs
-    hist_x = hist_x.reshape(-1, num_state_stack, self.input_dim) # batch, num_seqs, dim
+    hist_x = hist_x.reshape(-1, num_state_stack, self.input_dim)  # batch, num_seqs, dim
+    batch_num = hist_x.shape[0]
+
+    shape_input = hist_x[:, :, -self.shape_input_length:].reshape(-1, num_state_stack, MAX_DIMS, self.input_per_shape_dim)
+    embed_shape_input = self.embed_shape_dim(shape_input)
+    # self.first_part_feature
+    embed_remaining_input = self.embed_remaining_input(hist_x[:, :, :self.first_part_feature]).reshape(batch_num, 1, num_state_stack, self.input_inner_dim)
+
+    embed_x = self.embed_obs((embed_shape_input + embed_remaining_input).reshape(batch_num, num_state_stack, self.input_inner_dim * MAX_DIMS))
+
     # hist_x = hist_x[-steps:] # the history was stacked first. But we don't want the stacked frames. HACKKYY
     # could try to just use all hist??
-    batch_num = hist_x.shape[0]
-    seq_len = hist_x.shape[1]
+    # seq_len = hist_x.shape[1]
     # position embedding:
     # time_embedding = self.embed_timesteps(self.R).expand(batch_num, self.total_len, self.pos_dim)
     time_embedding = self.embed_timestep(torch.arange(self.total_len).to(device)).expand(batch_num, self.total_len, self.embed_dim)
-    r = time_embedding # this probably has to change with bigger length
+    r = time_embedding  # this probably has to change with bigger length
     # r = torch.zeros_like(time_embedding)
     # for i in range(batch_num):
     #   r[i, -steps[i]:] = time_embedding[i,:steps[i]]# time_embedding is the pos embedding from 0 to seq_len. However since we mask it partially we need to move it
-    embed_x = self.embed_obs(hist_x)
-    embed_x = F.relu(self.embed_obs_end(embed_x))+time_embedding
+    embed_x = embed_x + time_embedding
     # embed_x += time_embedding
     embed_x = self.embed_ln(embed_x)
     # start_pos = self.seq_len - steps
@@ -242,7 +288,7 @@ class Representation(nn.Module):
     # 1. is attend 0. is mask
     mask = torch.full((batch_num, self.total_len), 0., device=device, dtype=torch.long)
     for i in range(batch_num):
-      mask[i,:last_pos[i]] = 1
+      mask[i, :last_pos[i]] = 1
 
     last_obs = torch.empty((batch_num, self.input_dim)).to(device)
     for i in range(batch_num):
@@ -252,7 +298,7 @@ class Representation(nn.Module):
     if use_transformer:
       # out_transformer = self.transformer_model(embed_x, mask=mask)
       out_transformer = self.transformer_model(inputs_embeds=embed_x, attention_mask=mask)
-      out_transformer = out_transformer['last_hidden_state'][:, -1] # get last output
+      out_transformer = out_transformer['last_hidden_state'][:, -1]  # get last output
     else:
       out_transformer = last_obs
     x = F.relu(self.layer1(out_transformer))
@@ -287,6 +333,7 @@ class Dynamics(nn.Module):
     super().__init__()
     self.layer1 = torch.nn.Linear(input_dim + action_space, width)
     self.layer2 = torch.nn.Linear(width, width)
+    self.layer3 = torch.nn.Linear(width, width)
     self.hs_head = torch.nn.Linear(width, output_dim)
     self.reward_head = nn.Sequential(
       nn.Linear(width, width),
@@ -302,10 +349,9 @@ class Dynamics(nn.Module):
   def forward(self, x, action):
     action = self.one_hot_act[action.squeeze(1)]
     x = torch.cat((x, action.to(device)), dim=1)
-    x = self.layer1(x)
-    x = torch.nn.functional.relu(x)
-    x = self.layer2(x)
-    x = torch.nn.functional.relu(x)
+    x = F.relu(self.layer1(x))
+    x = F.relu(self.layer2(x))
+    x = F.relu(self.layer3(x))
     hs = self.hs_head(x)
     hs = torch.nn.functional.relu(hs)
     reward = self.reward_head(x)
@@ -331,11 +377,11 @@ class Prediction(nn.Module):
     self.layer1 = torch.nn.Linear(input_dim, width)
     self.layer2 = torch.nn.Linear(width, width)
     self.policy_head = nn.Sequential(
-      nn.Linear(width, width),
+      nn.Linear(width, width * 2),
       nn.ReLU(),
-      nn.Linear(width, width),
+      nn.Linear(width * 2, width * 2),
       nn.ReLU(),
-      nn.Linear(width, output_dim)
+      nn.Linear(width * 2, output_dim)
     )
     self.value_head = nn.Sequential(
       nn.Linear(width, width),
@@ -346,10 +392,8 @@ class Prediction(nn.Module):
     )
 
   def forward(self, x):
-    x = self.layer1(x)
-    x = torch.nn.functional.relu(x)
-    x = self.layer2(x)
-    x = torch.nn.functional.relu(x)
+    x = F.relu(self.layer1(x))
+    x = F.relu(self.layer2(x))
     P = self.policy_head(x)
     P = torch.nn.functional.softmax(P, dim=-1)
     V = self.value_head(x)
@@ -445,7 +489,7 @@ class Agent(nn.Module):
     self.var_m = [0 for _ in range(unroll_steps)]
     self.beta_product_m = [1.0 for _ in range(unroll_steps)]
 
-  def self_play_mu(self, target:Target, ast_num=None, eval=False, max_timestep=10000):
+  def self_play_mu(self, target: Target, ast_num=None, eval=False, max_timestep=10000):
     """Self-play and save trajectory to replay buffer
 
     (Originally target network used to inference policy, but i used agent network instead) # todo
@@ -459,19 +503,19 @@ class Agent(nn.Module):
     # print('running astnum', ast_num)
     self.env = State(ast_strs, ast_num)
     base_tm = self.env.set_base_tm()
-    state = self.env.feature()
-    state_dim = len(state)
+    state_feature = self.env.feature()
+    state_dim = len(state_feature)
     state_traj, action_traj, P_traj, r_traj = [], [], [], []
-    for i in range(MAX_DIMS):
-      start_state = state
+    for i in range(max_episode_length):
+      start_state = state_feature
       if num_state_stack == 1:
-        stacked_state = state
+        stacked_state = state_feature
       else:
         if i == 0:
-          stacked_state = np.concatenate(tuple(state for _ in range(num_state_stack)), axis=0) # for now just stack 2
+          stacked_state = np.concatenate(tuple(state_feature for _ in range(num_state_stack)), axis=0)  # for now just stack 2
         else:
           # stacked_state = np.roll(stacked_state, state_dim, axis=0)
-          stacked_state[state_dim*i:state_dim*(i+1)] = state
+          stacked_state[state_dim * i:state_dim * (i + 1)] = state_feature
       # it combines all observations into one transformer model I think one could see it as the representation network
       # to add to observation
       # https://arxiv.org/pdf/2301.07608.pdf
@@ -486,9 +530,18 @@ class Agent(nn.Module):
         # print('time for representation', time.perf_counter() - st)
         P, v = target.prediction_network(hs)
       probs = P.detach().cpu().numpy()
-      action = self.env.get_valid_action(probs, select_best=eval)
-      # action = np.random.choice(np.arange(self.action_space), p=P.detach().cpu().numpy())
-      self.env, state, r, done, info = self.env.step(action, dense_reward=not eval)
+      results = []
+      for _ in range(4):
+        action, probs = self.env.get_valid_action(probs, select_best=eval)
+        probs[action] = 0
+        ret = self.env.step(action, dense_reward=not eval)
+        results.append(ret + (action,))
+        if probs.sum()==0:
+          break
+        probs /= probs.sum()
+      best = np.argmax([result[2] for result in results])
+      # print('best i', best)
+      self.env, state_feature, r, done, info, action = results[best]
       if i == 0:
         for _ in range(num_state_stack):
           state_traj.append(start_state)
@@ -505,9 +558,9 @@ class Agent(nn.Module):
 
     # for update inference over trajectory length
     for _ in range(unroll_steps):
-      state_traj.append(np.zeros_like(state))
+      state_traj.append(np.zeros_like(state_feature))
 
-    for _ in range(unroll_steps+1):
+    for _ in range(unroll_steps + 1):
       r_traj.append(0.0)
       action_traj.append(-1)
     if not eval:
@@ -522,7 +575,7 @@ class Agent(nn.Module):
     base_to_beam = ((base_tm - beam_results[ast_num]) / base_tm) if beam else None
     return game_score, base_to_handcoded, base_to_beam, r, last_frame, ast_num
 
-  def update_weights_mu(self, target:Target):
+  def update_weights_mu(self, target: Target):
     """Optimize network weights.
 
     Iteration: 20
@@ -543,11 +596,11 @@ class Agent(nn.Module):
       r_traj = []
       G_arr_mb = []
 
-      for epi_sel in range(num_replays): # this is q
-        if (epi_sel > num_replays//4):  ## 1/4 of replay buffer is used for on-policy data
-          ep_i = np.random.randint(0, max(1,len(self.state_replay)-1))
+      for epi_sel in range(num_replays):  # this is q
+        if (epi_sel > num_replays // 4):  ## 1/4 of replay buffer is used for on-policy data
+          ep_i = np.random.randint(0, max(1, len(self.state_replay) - 1))
         else:
-          ep_i = -np.random.randint(max(1,episodes_per_train_update)) # pick one of the newest episodes
+          ep_i = -np.random.randint(max(1, episodes_per_train_update))  # pick one of the newest episodes
 
         ## multi step return G (orignally retrace used)
         G = 0
@@ -578,11 +631,11 @@ class Agent(nn.Module):
       hs_s = []
       v_logits_s = []
       r_logits_s = []
-      for i in range(1+unroll_steps):
+      for i in range(1 + unroll_steps):
         if i == 0:
           hs = self.representation_network(stacked_state_0, last_pos=state_traj_i)
         else:
-          hs, r_logits = self.dynamics_network(hs, action_traj[:, i-1])
+          hs, r_logits = self.dynamics_network(hs, action_traj[:, i - 1])
           r_logits_s.append(r_logits)
 
         P, v_logits = self.prediction_network(hs)
@@ -628,11 +681,11 @@ class Agent(nn.Module):
 
       ## z_cmpo_arr (eq.12)
       with torch.no_grad():
-        exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + 0.997 * v1_arr[k] - to_scalar(t_first_v_logits)) / under, -1, 1)) # -c, c
+        exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + 0.997 * v1_arr[k] - to_scalar(t_first_v_logits)) / under, -1, 1))  # -c, c
                             .tolist() for k in range(lookahead_samples)]
         exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
         z_cmpo_arr = []
-        for k in range(lookahead_samples): # k != i is fixed by "- exp_clip_adv_arr[k]"
+        for k in range(lookahead_samples):  # k != i is fixed by "- exp_clip_adv_arr[k]"
           z_cmpo = (1 + torch.sum(exp_clip_adv_arr[k], dim=0) - exp_clip_adv_arr[k]) / lookahead_samples
           z_cmpo_arr.append(z_cmpo.tolist())
       z_cmpo_arr = torch.tensor(z_cmpo_arr).to(device)
@@ -649,7 +702,7 @@ class Agent(nn.Module):
       ## L_m eq. 13
       L_m = 0
       for i in range(unroll_steps):
-        stacked_state = torch.cat(tuple(state_traj[:, i + j+1] for j in range(num_state_stack)), dim=1)
+        stacked_state = torch.cat(tuple(state_traj[:, i + j + 1] for j in range(num_state_stack)), dim=1)
         with torch.no_grad():
           t_hs = target.representation_network(stacked_state, last_pos=state_traj_i)
           t_P, t_v_logits = target.prediction_network(t_hs)
@@ -681,7 +734,7 @@ class Agent(nn.Module):
           exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
 
         ## Paper appendix F.2 : Prior policy
-        t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((minibatch_size,self.env.action_length()))/self.env.action_length()).to(device)
+        t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((minibatch_size, self.env.action_length())) / self.env.action_length()).to(device)
 
         pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
                         * exp_clip_adv_arr[k])
@@ -706,12 +759,10 @@ class Agent(nn.Module):
       for i in range(unroll_steps): L_r += (to_cr(r_traj[:, i]) * ls(r_logits_s[i])).sum(-1, keepdim=True)
       L_r = -1 * L_r
       ## start of dynamics network gradient *0.5
-      for i in range(unroll_steps+1): hs_s[i].register_hook(lambda grad: grad * 0.5)
+      for i in range(unroll_steps + 1): hs_s[i].register_hook(lambda grad: grad * 0.5)
 
       ## total loss
-      # todo not sure if 4 belongs to seq_in_replay,  or  num_replays
-      L_total = L_pg_cmpo + L_v / (unroll_steps+1) / 4 + L_r / unroll_steps / 1 + L_m # todo check if unroll_steps is good here
-      # todo divided by 1?
+      L_total = L_pg_cmpo + L_v / (unroll_steps + 1) / 4 + L_r / unroll_steps / 1 + L_m
       ## optimize
       self.optimizer.zero_grad()
       L_total.mean().backward()
@@ -731,12 +782,13 @@ class Agent(nn.Module):
 
     writer.add_scalar('Loss/L_total', L_total.mean(), global_i)
     writer.add_scalar('Loss/L_pg_cmpo', L_pg_cmpo.mean(), global_i)
-    writer.add_scalar('Loss/L_v', (L_v / (unroll_steps+1) / 4).mean(), global_i)
+    writer.add_scalar('Loss/L_v', (L_v / (unroll_steps + 1) / 4).mean(), global_i)
     writer.add_scalar('Loss/L_r', (L_r / unroll_steps / 1).mean(), global_i)
     writer.add_scalar('Loss/L_m', (L_m).mean(), global_i)
     writer.add_scalars('vars', {'self.var': self.var,
                                 'self.var_m': self.var_m[0]
                                 }, global_i)
+
 
 device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 score_arr = []
@@ -757,39 +809,44 @@ first_ast_nums_correct = list(range(20))
 #     del env
 #     del first_ast_nums_correct[i]
 first_ast_nums = len(first_ast_nums_correct)
-time.sleep(5)
 num_replays = 64
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
-num_state_stack = MAX_DIMS
+max_trials = 1
+use_sts = False
+max_episode_length = MAX_DIMS * max_trials
+num_state_stack = max_episode_length
 
-test_size = 5
-train_updates = 2
-episodes_per_train_update = 1
-episodes_per_eval = 30
-start_training_epoch = 10 # todo set higher
+test_size = 10
+train_updates = 10
+episodes_per_train_update = 20
+episodes_per_eval = 40
+start_training_epoch = 20  # todo set higher
 assert start_training_epoch >= episodes_per_train_update
 use_transformer = True
-alpha_target = 0.05 # 5% new to target
+alpha_target = 0.05  # 5% new to target
 
-regularizer_multiplier = 1 # was 5 but that seems very high
+regularizer_multiplier = 2  # was 5 but that seems very high
 
-lookahead_samples = 16
-lookahead_samples2 = 16 # this is in the unroll
-unroll_steps = 3 # todo cannot be changed at the moment
+lookahead_samples = 32
+lookahead_samples2 = 32  # this is in the unroll
+unroll_steps = 5
 
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
+env.base_tm = -1
+assert observation_space[0] == len(env.feature())
 action_space = env.action_length()
 episode_nums = 2000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
 # exp_str = 'test_no_transformer_'+timing_str # 1,
-exp_str = 'test_new_transformer_less_training_updates'+timing_str # 1,
+# exp_str = 'test_new_transformer_less_training_updates'+timing_str # 1,
+exp_str = 'test_more_trials' + timing_str  # 1,
 del env
-target = Target(observation_space[0], action_space, 256)
+target = Target(observation_space[0], action_space, 1024)
 target.eval()
-agent = Agent(observation_space[0], action_space, 256)
+agent = Agent(observation_space[0], action_space, 1024)
 # target = Target(env.observation_space.shape[0], env.action_space.n, 128)
 # agent = Agent(env.observation_space.shape[0], env.action_space.n, 128)
 # print(agent)
@@ -859,20 +916,20 @@ for i in range(episode_nums):
 
   if i % episodes_per_eval == 0 and i >= start_training_epoch:
     print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
-    best_score_related_to_handcoded = (best_ast_num_scores-handcoded_best_ast_num_scores)[best_ast_num_scores != 0.]
+    best_score_related_to_handcoded = (best_ast_num_scores - handcoded_best_ast_num_scores)[best_ast_num_scores != 0.]
     writer.add_scalar('best_found_score_related_to_handcoded', best_score_related_to_handcoded.mean(), global_i)
-    mean_score = np.mean(np.array(score_arr[i - 30:i+1]))
-    more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i+1]))
+    mean_score = np.mean(np.array(score_arr[i - 30:i + 1]))
+    more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i + 1]))
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
-    scores,test_scores = [],[]
-    for i in first_ast_nums_correct[:-test_size]: # eval
+    scores, test_scores = [], []
+    for i in first_ast_nums_correct[:-test_size]:  # eval
       game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
       more_than_handcoded = game_score - base_to_handcoded
       if beam:
         more_than_beam = game_score - base_to_beam
 
       scores.append([game_score, more_than_handcoded, base_to_beam])
-    for i in first_ast_nums_correct[-test_size:]: # eval
+    for i in first_ast_nums_correct[-test_size:]:  # eval
       game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
       more_than_handcoded = game_score - base_to_handcoded
       if beam:
@@ -880,12 +937,12 @@ for i in range(episode_nums):
 
       test_scores.append([game_score, more_than_handcoded, base_to_beam])
     scores = np.array(scores)
-    writer.add_scalar('eval_train/relative_to_base_score', scores[:,0].mean(), global_i)
-    writer.add_scalar('eval_train/more_than_handcoded', scores[:,1].mean(), global_i)
+    writer.add_scalar('eval_train/relative_to_base_score', scores[:, 0].mean(), global_i)
+    writer.add_scalar('eval_train/more_than_handcoded', scores[:, 1].mean(), global_i)
     # writer.add_scalar('eval_train/more_than_beam', scores[:,2].mean(), global_i)
 
-    writer.add_scalar('eval_test/relative_to_base_score', scores[:,0].mean(), global_i)
-    writer.add_scalar('eval_test/more_than_handcoded', scores[:,1].mean(), global_i)
+    writer.add_scalar('eval_test/relative_to_base_score', test_scores[:, 0].mean(), global_i)
+    writer.add_scalar('eval_test/more_than_handcoded', test_scores[:, 1].mean(), global_i)
     # writer.add_scalar('eval_test/more_than_beam', scores[:,2].mean(), global_i)
 
     # print('eval relative_to_base_score', scores[:,0].round(2))

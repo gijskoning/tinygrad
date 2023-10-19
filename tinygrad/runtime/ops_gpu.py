@@ -87,6 +87,7 @@ class CLProgram:
   def max_work_group_size(): return CL.cl_ctxs[0].devices[0].max_work_group_size
 
   def __call__(self, global_size, local_size, *bufs, wait=False) -> Optional[float]:
+    # todo should change timeout!!
     if not hasattr(self, 'argdtypes'): self.set_argdtypes(tuple(None if x.__class__ is CLBuffer else np.int32 for x in bufs))
     cl_bufs, wait_for = [], []
     for x in bufs:
@@ -96,6 +97,8 @@ class CLProgram:
       else: cl_bufs.append(x)
     e = self.clprgs[cl_bufs[0].device](CL.cl_queue[cl_bufs[0].device], [int(g*l) for g,l in zip(global_size, local_size)] if local_size is not None else global_size, local_size, *cl_bufs, wait_for=wait_for)
     if wait:
+      # if isinstance(wait, int):
+      #   e.wait(wait)
       e.wait()
       try:
         return ((e.profile.end - e.profile.start) * OSX_TIMING_RATIO) * 1e-9
