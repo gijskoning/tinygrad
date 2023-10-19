@@ -4,17 +4,23 @@ from tinygrad.helpers import dtypes
 from tinygrad.shape.shapetracker import ShapeTracker
 from tinygrad.shape.view import View
 from tinygrad.shape.symbolic import Variable
+
 inf, nan = float('inf'), float('nan')
 
 # kernel unpacker
 from tinygrad.codegen.linearizer import Linearizer
+
+
 def ast_str_to_lin(ast_str): return Linearizer(eval(ast_str))
+
 
 # load worlds, a dataset of about 12k kernels
 import gzip
 from pathlib import Path
 import random
 from tinygrad.helpers import dedup
+
+
 def load_worlds(filter_reduce=True, filter_noimage=True, filter_novariable=True):
   fn = Path(__file__).parent.parent / "datasets/sops.gz"
   ast_strs = dedup(gzip.open(fn).read().decode('utf-8').strip().split("\n"))
@@ -25,9 +31,11 @@ def load_worlds(filter_reduce=True, filter_noimage=True, filter_novariable=True)
   random.shuffle(ast_strs)
   return ast_strs
 
+
 def assert_same_lin(l1, l2):
   assert l1.colored_shape() == l2.colored_shape()
-  assert all(x==y for x,y in zip(l1.sts, l2.sts))
+  assert all(x == y for x, y in zip(l1.sts, l2.sts))
+
 
 # get features
 import math
@@ -36,7 +44,8 @@ from tinygrad.shape.symbolic import Node
 MAX_DIMS = 16
 MAX_BUFS = 9
 
-def lin_to_feats(lin:Linearizer, use_sts=True):
+
+def lin_to_feats(lin: Linearizer, use_sts=True):
   assert lin.shape_len < MAX_DIMS, "too many dims"
 
   all_colors = ["blue", "cyan", "white", "green", "red", "magenta", "yellow"]
@@ -44,36 +53,41 @@ def lin_to_feats(lin:Linearizer, use_sts=True):
 
   ret = []
   # before, some generic linearizer stuff
-  ret.append(lin.upcasted)
-  ret.append(lin.local_dims)
+  upcasted_one_hot = [0] * MAX_DIMS
+  upcasted_one_hot[lin.upcasted] = 1
+  ret += upcasted_one_hot
+  local_dims_one_hot = [0] * MAX_DIMS
+  local_dims_one_hot[lin.local_dims] = 1
+  ret += local_dims_one_hot
 
   # first, the full shape, including the colors
-  for s,os,c in zip(lin.full_shape,lin.output_shape,lc):
+  for s, os, c in zip(lin.full_shape, lin.output_shape, lc):
     if isinstance(s, Node):
       ret.append(False)
-      ret += [0]*9
+      ret += [0] * 9
     else:
       ret.append(True)
       ret.append(math.log2(s))
       ret.append(min(33, s))
       ret.append(math.log2(os))
       ret.append(min(33, os))
-      ret.append(s%2 == 0)
-      ret.append(s%3 == 0)
-      ret.append(s%4 == 0)
-      ret.append(s%8 == 0)
-      ret.append(s%16 == 0)
-    cc = [0]*7
+      ret.append(s % 2 == 0)
+      ret.append(s % 3 == 0)
+      ret.append(s % 4 == 0)
+      ret.append(s % 8 == 0)
+      ret.append(s % 16 == 0)
+    cc = [0] * 7
     cc[c] = 1
     ret += cc
-  ret += [0] * (17*(MAX_DIMS-len(lin.full_shape)))
+  ret += [0] * (17 * (MAX_DIMS - len(lin.full_shape)))
   ret = [float(x) for x in ret]
 
   if use_sts:
     my_sts = dedup([(x.shape == lin.full_shape, x.real_strides(), any(v.mask is not None for v in x.views), len(x.views)) for x in lin.sts])
     assert len(my_sts) < MAX_BUFS
-    sts_len = 3 + 5*MAX_DIMS
+    sts_len = 3 + 5 * MAX_DIMS
     for s in my_sts:
+      print(s)
       ret.append(s[0])  # reduce
       ret.append(s[2])  # has mask
       ret.append(s[3])  # len views
@@ -82,11 +96,14 @@ def lin_to_feats(lin:Linearizer, use_sts=True):
         ret.append(d == 0)
         ret.append(d == 1)
         ret.append(min(33, d) if d is not None else -1)
-        if d is not None and d >= 1: ret.append(math.log2(d))
-        else: ret.append(-1)
-      ret += [0] * (5*(MAX_DIMS - len(s[1])))
-    ret += [0] * (sts_len*(MAX_BUFS - len(my_sts)))
-    assert len(ret) == 1021, f"wrong len {len(ret)}"
+        if d is not None and d >= 1:
+          ret.append(math.log2(d))
+        else:
+          ret.append(-1)
+      ret += [0] * (5 * (MAX_DIMS - len(s[1])))
+    ret += [0] * (sts_len * (MAX_BUFS - len(my_sts)))
+    ret = [float(x) for x in ret]
+    assert len(ret) == 1019 + 32, f"wrong len {len(ret)}"
   else:
-    assert len(ret) == 274, f"wrong len {len(ret)}"
+    assert len(ret) == 272 + 32, f"wrong len {len(ret)}"
   return ret
