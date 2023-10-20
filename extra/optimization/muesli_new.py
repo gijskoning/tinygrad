@@ -438,7 +438,7 @@ class Agent(nn.Module):
       action_mask = np.zeros((1, action_space))
       action_mask[0, legal_actions[0]] = 1
       parallel_num = 1
-      greedy = not evaluation and (episode_num < 50 or np.random.rand() < 0.1)
+      greedy = not evaluation and (episode_num < 40 or np.random.rand() < (0.98**episode_nums))# episode 100 is 0.13 chance greedy
       if greedy:
         results = []
         for action in legal_actions[0]:
