@@ -87,7 +87,6 @@ def lin_to_feats(lin: Linearizer, use_sts=True):
     assert len(my_sts) < MAX_BUFS
     sts_len = 3 + 5 * MAX_DIMS
     for s in my_sts:
-      print(s)
       ret.append(s[0])  # reduce
       ret.append(s[2])  # has mask
       ret.append(s[3])  # len views

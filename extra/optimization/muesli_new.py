@@ -9,7 +9,7 @@ import transformers
 from torch.utils.tensorboard import SummaryWriter
 from transformers import GPT2Model
 
-from LightZero.lzero.policy import negative_cosine_similarity
+from extra.optimization.efficientzero_funcs import negative_cosine_similarity
 
 os.environ["GPU"] = '1'
 # os.environ["PYOPENCL_NO_CACHE"] = '1'
@@ -145,7 +145,7 @@ class State:
 
   @staticmethod
   def base_feature_shape():
-    return 1019+32 if use_sts else 272+32
+    return 1019 + 32 if use_sts else 272 + 32
 
   @staticmethod
   def action_length():
@@ -218,98 +218,27 @@ class Representation(nn.Module):
 
   def __init__(self, input_dim, output_dim, width):
     super().__init__()
-    self.input_dim = input_dim
-    self.first_part_feature = 2
-    self.shape_input_length = State.base_feature_shape() - self.first_part_feature
-    # assert self.shape_input_length % MAX_DIMS == 0
-    self.input_per_shape_dim = self.shape_input_length // MAX_DIMS
-    self.total_len = max_episode_length
-
-    self.input_inner_dim = 64
-    self.embed_dim = 512
-    self.pos_dim = 32
-
-    self.embed_shape_dim = torch.nn.Linear(self.input_per_shape_dim, self.input_inner_dim)
-    self.embed_remaining_input = torch.nn.Linear(self.first_part_feature, self.input_inner_dim)
-
-    self.embed_obs = torch.nn.Linear(self.input_inner_dim * MAX_DIMS, self.embed_dim)  # might want to add selfattention here
-    # self.embed_obs_end = torch.nn.Linear(self.embed_dim, self.embed_dim)  # might want to add selfattention here
-    self.embed_ln = nn.LayerNorm(self.embed_dim)
-    # looking at https://github.com/kzl/decision-transformer/blob/master/gym/decision_transformer/models/decision_transformer.py
-    # R = get_sinusoid_pos_encoding(self.total_len, self.pos_dim)
-    # self.R = torch.flip(R, dims=(0,)).to(device)
-    self.embed_timestep = nn.Embedding(self.total_len, self.embed_dim)
-    # self.embed_timesteps = nn.Linear(self.pos_dim, self.pos_dim, bias=False)
-    config = transformers.GPT2Config(
-      vocab_size=1,  # doesn't matter -- we don't use the vocab
-      n_embd=self.embed_dim,
-      n_head=4
-    )
-    self.transformer_model = GPT2Model(config)
-    self.skip = torch.nn.Linear(input_dim, width)
-    self.skip2 = torch.nn.Linear(width, output_dim)
-    self.layer1 = torch.nn.Linear(self.embed_dim if use_transformer else input_dim, width)
+    self.skip = torch.nn.Linear(input_dim, output_dim)
+    self.layer1 = torch.nn.Linear(input_dim, width)
     self.layer2 = torch.nn.Linear(width, width)
-    # self.layer3 = torch.nn.Linear(width, width)
-    # self.layer4 = torch.nn.Linear(width, width)
+    self.layer3 = torch.nn.Linear(width, width)
+    self.layer4 = torch.nn.Linear(width, width)
     self.layer5 = torch.nn.Linear(width, output_dim)
-    # if not use_transformer
 
-  def forward(self, hist_x, last_pos=None):
-    # assumes hist_x is orderd in steps [0,1...last_pos, ..., MAX_DIMS-1]
-    # x: stacked obs
-    hist_x = hist_x.reshape(-1, num_state_stack, self.input_dim)  # batch, num_seqs, dim
-    batch_num = hist_x.shape[0]
-
-    shape_input = hist_x[:, :, -self.shape_input_length:].reshape(-1, num_state_stack, MAX_DIMS, self.input_per_shape_dim)
-    embed_shape_input = self.embed_shape_dim(shape_input)
-    # self.first_part_feature
-    embed_remaining_input = self.embed_remaining_input(hist_x[:, :, :self.first_part_feature]).reshape(batch_num, 1, num_state_stack, self.input_inner_dim)
-
-    embed_x = self.embed_obs((embed_shape_input + embed_remaining_input).reshape(batch_num, num_state_stack, self.input_inner_dim * MAX_DIMS))
-
-    # hist_x = hist_x[-steps:] # the history was stacked first. But we don't want the stacked frames. HACKKYY
-    # could try to just use all hist??
-    # seq_len = hist_x.shape[1]
-    # position embedding:
-    # time_embedding = self.embed_timesteps(self.R).expand(batch_num, self.total_len, self.pos_dim)
-    time_embedding = self.embed_timestep(torch.arange(self.total_len).to(device)).expand(batch_num, self.total_len, self.embed_dim)
-    r = time_embedding  # this probably has to change with bigger length
-    # r = torch.zeros_like(time_embedding)
-    # for i in range(batch_num):
-    #   r[i, -steps[i]:] = time_embedding[i,:steps[i]]# time_embedding is the pos embedding from 0 to seq_len. However since we mask it partially we need to move it
-    embed_x = embed_x + time_embedding
-    # embed_x += time_embedding
-    embed_x = self.embed_ln(embed_x)
-    # start_pos = self.seq_len - steps
-    # mask = torch.full((batch_num, 1, self.total_len, self.total_len), float("-inf"), device=device)
-    # 1. is attend 0. is mask
-    mask = torch.full((batch_num, self.total_len), 0., device=device, dtype=torch.long)
-    for i in range(batch_num):
-      mask[i, :last_pos[i]] = 1
-
-    last_obs = torch.empty((batch_num, self.input_dim)).to(device)
-    for i in range(batch_num):
-      last_obs[i] = hist_x[i, last_pos[i]]
-    s = F.relu(self.skip(last_obs))
-    s = self.skip2(s)
-    if use_transformer:
-      # out_transformer = self.transformer_model(embed_x, mask=mask)
-      out_transformer = self.transformer_model(inputs_embeds=embed_x, attention_mask=mask)
-      out_transformer = out_transformer['last_hidden_state'][:, -1]  # get last output
-    else:
-      out_transformer = last_obs
-    x = F.relu(self.layer1(out_transformer))
-    x = F.relu(self.layer2(x))
-    # x = F.relu(self.layer3(x))
-    # x = self.layer4(x)
-    # x = torch.nn.functional.relu(x)
+  def forward(self, x):
+    s = self.skip(x)
+    x = self.layer1(x)
+    x = torch.nn.functional.relu(x)
+    x = self.layer2(x)
+    x = torch.nn.functional.relu(x)
+    x = self.layer3(x)
+    x = torch.nn.functional.relu(x)
+    x = self.layer4(x)
+    x = torch.nn.functional.relu(x)
     x = self.layer5(x)
-    x = F.relu(x + s)
-    assert torch.isfinite(x).all()
+    x = torch.nn.functional.relu(x + s)
     x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
-    assert torch.isfinite(x).all()
-    return x.squeeze()
+    return x
 
 
 class Dynamics(nn.Module):
@@ -346,7 +275,7 @@ class Dynamics(nn.Module):
 
   def forward(self, x, action):
     action = self.one_hot_act[action.squeeze(1)]
-    x = torch.cat((x, action.to(device)), dim=1)
+    x = torch.cat((x, action.to(device)), dim=-1)
     x = F.relu(self.layer1(x))
     x = F.relu(self.layer2(x))
     x = F.relu(self.layer3(x))
@@ -383,6 +312,7 @@ class Prediction(nn.Module):
       activation,
       nn.Linear(width * 2, output_dim)
     )
+    head_out = support_size * 2 + 1 if support_size != 1 else 1
     self.value_head = nn.Sequential(
       nn.Linear(width, width),
       activation,
@@ -390,8 +320,14 @@ class Prediction(nn.Module):
       activation,
       nn.Linear(width, width),
       activation,
-      nn.Linear(width, 1)
+      nn.Linear(width, head_out)
     )
+    # from efficientnet
+    self.projection_input_dim = input_dim
+    self.pred_hid = 512
+    self.proj_hid = 1024
+    self.proj_out = 1024
+    self.pred_out = 1024
     self.projection = nn.Sequential(
       nn.Linear(self.projection_input_dim, self.proj_hid), nn.BatchNorm1d(self.proj_hid), activation,
       nn.Linear(self.proj_hid, self.proj_hid), nn.BatchNorm1d(self.proj_hid), activation,
@@ -419,15 +355,18 @@ reference : https://github.com/werner-duvaud/muzero-general
 In my opinion, support size have to cover the range of maximum absolute value of 
 reward and value of entire trajectories. Support_size 30 can cover almost [-900,900].
 """
-support_size = 30
+support_size = 300  # efficientzero even has 300 here
 eps = 0.001
-
-
+from line_profiler_pycharm import profile
+support_tensor = None
+@profile
 def to_scalar(x):
+  global support_tensor
   x = torch.softmax(x, dim=-1)
   probabilities = x
-  support = (torch.tensor([x for x in range(-support_size, support_size + 1)]).expand(probabilities.shape).float().to(device))
-  x = torch.sum(support * probabilities, dim=1, keepdim=True)
+  if support_tensor is None:
+    support_tensor = (torch.tensor([x for x in range(-support_size, support_size + 1)]).expand(probabilities.shape).float().to(device))
+  x = torch.sum(support_tensor * probabilities, dim=-1, keepdim=True)
   scalar = torch.sign(x) * (((torch.sqrt(1 + 4 * eps * (torch.abs(x) + 1 + eps)) - 1) / (2 * eps)) ** 2 - 1)
   return scalar
 
@@ -471,7 +410,7 @@ class Target(nn.Module):
     # self.representation_network = Representation(state_dim * num_state_stack, state_dim * 4, width)
     self.representation_network = Representation(state_dim, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
-    self.prediction_network = Prediction(state_dim, action_dim, width)
+    self.prediction_network = Prediction(state_dim * 4, action_dim, width)
     self.to(device)
 
 
@@ -482,8 +421,8 @@ class Agent(nn.Module):
   def __init__(self, state_dim, action_dim, width):
     super().__init__()
     self.representation_network = Representation(state_dim, state_dim * 4, width)
-    self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)
-    self.prediction_network = Prediction(state_dim, action_dim, width)
+    self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)  # todo change to lstm
+    self.prediction_network = Prediction(state_dim * 4, action_dim, width)
     self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
     self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=episode_nums, end_learning_rate=0.0000)
     self.to(device)
@@ -518,21 +457,14 @@ class Agent(nn.Module):
     self.env = State(ast_strs, ast_num)
     base_tm = self.env.set_base_tm()
     state_feature = self.env.feature()
-    state_dim = len(state_feature)
+    # state_dim = len(state_feature)
     state_traj, action_traj, P_traj, r_traj = [], [], [], []
-    _, base_v = target.prediction_network(torch.from_numpy(state_feature).to(device))
-
+    hs = target.representation_network(torch.from_numpy(state_feature).to(device))
+    _, base_v_logits = target.prediction_network(hs)
+    base_v = to_scalar(base_v_logits.unsqueeze(0))
 
     for i in range(max_episode_length):
       current_state_state = state_feature
-      if num_state_stack == 1:
-        stacked_state = state_feature
-      else:
-        if i == 0:
-          stacked_state = np.concatenate(tuple(state_feature for _ in range(num_state_stack)), axis=0)  # for now just stack 2
-        else:
-          # stacked_state = np.roll(stacked_state, state_dim, axis=0)
-          stacked_state[state_dim * i:state_dim * (i + 1)] = state_feature
       # it combines all observations into one transformer model I think one could see it as the representation network
       # to add to observation
       # https://arxiv.org/pdf/2301.07608.pdf
@@ -543,10 +475,10 @@ class Agent(nn.Module):
       # basetiming to state
       with torch.no_grad():
         # st = time.perf_counter()
-        # hs = target.representation_network(torch.from_numpy(stacked_state).float().to(device), last_pos=np.array([i]))
+        hs = target.representation_network(torch.from_numpy(current_state_state).to(device))
         # print('time for representation', time.perf_counter() - st)
-        # P, v = target.prediction_network(torch.from_numpy(stacked_state).float().to(device))
-        P, v = target.prediction_network(torch.from_numpy(state_feature).to(device))
+        P, v = target.prediction_network(hs)
+        # P, v = target.prediction_network(torch.from_numpy(state_feature).to(device))
       # probs = P.detach().cpu().numpy()
       probs = np.ones((self.action_space)) / self.action_space
       results = []
@@ -555,10 +487,12 @@ class Agent(nn.Module):
         probs[action] = 0
         new_env, state_feature, r, done, info = self.env.step(action, dense_reward=not eval)
         with torch.no_grad():
-          _, v = target.prediction_network(torch.from_numpy(state_feature).to(device))
-        # if j == 0:
-        #   print('v', to_scalar(v.unsqueeze(0)).item(), 'r', r)
-        results.append((new_env, state_feature, r, done, info, action,v.item()))
+          hs = target.representation_network(torch.from_numpy(state_feature).to(device))
+          _, v_logits = target.prediction_network(hs)
+          # if j == 0:
+          v = to_scalar(v_logits.unsqueeze(0)).item()
+          # print('v', v, 'r', r)
+        results.append((new_env, state_feature, r, done, info, action, v))
         # results.append((new_env, state_feature, r, done, info, action,to_scalar(v.unsqueeze(0)).item()))
         if probs.sum() == 0:
           break
@@ -601,7 +535,8 @@ class Agent(nn.Module):
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
     base_to_beam = ((base_tm - beam_results[ast_num]) / base_tm) if beam else None
     return game_score, base_to_handcoded, base_to_beam, r, last_frame, ast_num
-
+  from line_profiler_pycharm import profile
+  @profile
   def update_weights_mu(self, target: Target):
     """Optimize network weights.
 
@@ -622,7 +557,6 @@ class Agent(nn.Module):
       P_traj = []
       r_traj = []
       G_arr_mb = []
-
       for epi_sel in range(num_replays):  # this is q
         if (epi_sel > num_replays // 4):  ## 1/4 of replay buffer is used for on-policy data
           ep_i = np.random.randint(0, max(1, len(self.state_replay) - 1))
@@ -639,183 +573,195 @@ class Agent(nn.Module):
         for i in np.random.randint(len(self.state_replay[ep_i]) - unroll_steps - (num_state_stack - 1), size=seq_in_replay):
           state_traj_i.append(i)
           state_traj.append(self.state_replay[ep_i][i:i + unroll_steps + num_state_stack])
-          action_traj.append(self.action_replay[ep_i][i:i + unroll_steps])
+          action_traj.append(self.action_replay[ep_i][i:i + unroll_steps + num_state_stack])
           r_traj.append(self.r_replay[ep_i][i:i + unroll_steps])
           G_arr_mb.append(G_arr[i:i + unroll_steps + 1])
           P_traj.append(self.P_replay[ep_i][i])
+
       state_traj_i = np.array(state_traj_i)
       state_traj = torch.from_numpy(np.array(state_traj)).to(device)
       action_traj = torch.from_numpy(np.array(action_traj)).unsqueeze(2).to(device)
       P_traj = torch.from_numpy(np.array(P_traj)).to(device)
       G_arr_mb = torch.from_numpy(np.array(G_arr_mb)).unsqueeze(2).float().to(device)
       r_traj = torch.from_numpy(np.array(r_traj)).unsqueeze(2).float().to(device)
+      mask_batch = torch.zeros_like(action_traj)
+      mask_batch[action_traj != -1] = 1  # all states with action not -1 are valid states
+
       inferenced_P_arr = []
 
       ## stacking
-      # stacked_state_0 = torch.cat(tuple(state_traj[:, i] for i in range(num_state_stack)), dim=1)
+      state_0 = state_traj[:, 0]
 
       ## agent network inference (5 step unroll)
-      hs_s = []
+      latent_states = []
       v_logits_s = []
       r_logits_s = []
-
-
       for i in range(1 + unroll_steps):
-        stacked_state_0 = torch.cat(tuple(state_traj[:, j+i] for j in range(num_state_stack)), dim=1)
+        if i == 0:
+          hs = self.representation_network(state_0)
+        else:
+          hs, r_logits = self.dynamics_network(hs, action_traj[:, i - 1])
+          r_logits_s.append(r_logits)
 
-        P, v_logits = self.prediction_network(stacked_state_0)
+        P, v_logits = self.prediction_network(hs)
+        latent_states.append(hs)
         v_logits_s.append(v_logits)
-      #   stacked_state_0 = torch.cat(tuple(state_traj[:, i] for i in range(num_state_stack)), dim=1)
-      #
-      #   P, v_logits = self.prediction_network(stacked_state_0)
-      #   v_logits_s.append(v_logits)
-      #   # if i == 0:
-      #   #   hs = self.representation_network(stacked_state_0, last_pos=state_traj_i)
-      #   # else:
-      #   #   hs, r_logits = self.dynamics_network(hs, action_traj[:, i - 1])
-      #   #   r_logits_s.append(r_logits)
-      #
-      #   P, v_logits = self.prediction_network(hs)
-      #   hs_s.append(hs)
-      #   v_logits_s.append(v_logits)
-      #   inferenced_P_arr.append(P)
-      # first_P = inferenced_P_arr[0]
+        inferenced_P_arr.append(P)
+      first_P = inferenced_P_arr[0]
 
-      ## target network inference
-      # with torch.no_grad():
-      #   t_first_hs = target.representation_network(stacked_state_0, last_pos=state_traj_i)
-      #   t_first_P, t_first_v_logits = target.prediction_network(t_first_hs)
-      #
-      #   ## normalized advantage
-      # beta_var = 0.99
-      # self.var = beta_var * self.var + (1 - beta_var) * (torch.sum((G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) ** 2) / minibatch_size)
-      # self.beta_product *= beta_var
-      # var_hat = self.var / (1 - self.beta_product)
-      # under = torch.sqrt(var_hat + 1e-12)
-      #
-      # ## L_pg_cmpo first term (eq.10)
-      # importance_weight = torch.clip(first_P.gather(1, action_traj[:, 0])
-      #                                / (P_traj.gather(1, action_traj[:, 0])),
-      #                                0, 1
-      #                                )
-      # first_term = -1 * importance_weight * (G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) / under
-      #
-      # ## eq. 14. Lookahead inferences (one step look-ahead to some actions to estimate q_prior, from target network)
-      # with torch.no_grad():
-      #   r1_arr = []
-      #   v1_arr = []
-      #   a1_arr = []
-      #   for _ in range(lookahead_samples):  # sample <= N(action space), now N
-      #     action1_stack = []
-      #     for p in t_first_P:
-      #       action1_stack.append(np.random.choice(np.arange(self.action_space), p=p.detach().cpu().numpy()))
-      #     hs, r1 = target.dynamics_network(t_first_hs, torch.unsqueeze(torch.tensor(action1_stack), 1))
-      #     _, v1 = target.prediction_network(hs)
-      #
-      #     r1_arr.append(to_scalar(r1))
-      #     v1_arr.append(to_scalar(v1))
-      #     a1_arr.append(torch.tensor(action1_stack))
-      #
-      # ## z_cmpo_arr (eq.12)
-      # with torch.no_grad():
-      #   exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + gamma * v1_arr[k] - to_scalar(t_first_v_logits)) / under, -1, 1))  # -c, c
-      #                       .tolist() for k in range(lookahead_samples)]
-      #   exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
-      #   z_cmpo_arr = []
-      #   for k in range(lookahead_samples):  # k != i is fixed by "- exp_clip_adv_arr[k]"
-      #     z_cmpo = (1 + torch.sum(exp_clip_adv_arr[k], dim=0) - exp_clip_adv_arr[k]) / lookahead_samples
-      #     z_cmpo_arr.append(z_cmpo.tolist())
-      # z_cmpo_arr = torch.tensor(z_cmpo_arr).to(device)
-      #
-      # ## L_pg_cmpo second term (eq.11)
-      # second_term = 0
-      # for k in range(lookahead_samples):
-      #   second_term += exp_clip_adv_arr[k] / z_cmpo_arr[k] * torch.log(first_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device)))
-      # second_term *= -1 * regularizer_multiplier / lookahead_samples
-      #
-      # ## L_pg_cmpo
-      # L_pg_cmpo = first_term + second_term
-      #
-      # ## L_m eq. 13
-      # L_m = 0
-      # for i in range(unroll_steps):
-      #   stacked_state = torch.cat(tuple(state_traj[:, i + j + 1] for j in range(num_state_stack)), dim=1)
-      #   with torch.no_grad():
-      #     t_hs = target.representation_network(stacked_state, last_pos=state_traj_i)
-      #     t_P, t_v_logits = target.prediction_network(t_hs)
-      #
-      #   beta_var = 0.99
-      #   self.var_m[i] = beta_var * self.var_m[i] + (1 - beta_var) * (torch.sum((G_arr_mb[:, i + 1] - to_scalar(t_v_logits)) ** 2) / minibatch_size)
-      #   self.beta_product_m[i] *= beta_var
-      #   var_hat = self.var_m[i] / (1 - self.beta_product_m[i])
-      #   under = torch.sqrt(var_hat + 1e-12)
-      #
-      #   with torch.no_grad():
-      #     r1_arr = []
-      #     v1_arr = []
-      #     a1_arr = []
-      #     for j in range(lookahead_samples2):
-      #       action1_stack = []
-      #       for p in t_P:
-      #         action1_stack.append(np.random.choice(np.arange(self.action_space), p=p.detach().cpu().numpy()))
-      #       hs, r1 = target.dynamics_network(t_hs, torch.unsqueeze(torch.tensor(action1_stack), 1))
-      #       _, v1 = target.prediction_network(hs)
-      #
-      #       r1_arr.append(to_scalar(r1))
-      #       v1_arr.append(to_scalar(v1))
-      #       a1_arr.append(torch.tensor(action1_stack))
-      #
-      #   with torch.no_grad():
-      #     exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + gamma * v1_arr[k] - to_scalar(t_v_logits)) / under, -1, 1))
-      #                         .tolist() for k in range(lookahead_samples2)]
-      #     exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
-      #
-      #   ## Paper appendix F.2 : Prior policy
-      #   t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((minibatch_size, self.env.action_length())) / self.env.action_length()).to(device)
-      #
-      #   pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
-      #                   * exp_clip_adv_arr[k])
-      #                  .squeeze(-1).tolist() for k in range(lookahead_samples2)]
-      #
-      #   pi_cmpo_all = torch.tensor(pi_cmpo_all).transpose(0, 1).to(device)
-      #   pi_cmpo_all = pi_cmpo_all / torch.sum(pi_cmpo_all, dim=1).unsqueeze(-1)
-      #   kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
-      #   # I think this is right. todo but not completely sure
-      #   P_arr_selected_actions = torch.gather(inferenced_P_arr[i + 1], 1, torch.stack(a1_arr).T.to(device))
-      #   L_m += kl_loss(torch.log(P_arr_selected_actions), pi_cmpo_all)
-      #
-      # L_m /= unroll_steps
+      # target network inference
+      with torch.no_grad():
+        t_first_hs = target.representation_network(state_0)
+        t_first_P, t_first_v_logits = target.prediction_network(t_first_hs)
 
-      # network_output = self._learn_model.initial_inference(obs_target_batch[:, beg_index:end_index])
+        ## normalized advantage
+      beta_var = 0.99
+      self.var = beta_var * self.var + (1 - beta_var) * (torch.sum((G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) ** 2) / minibatch_size)
+      self.beta_product *= beta_var
+      var_hat = self.var / (1 - self.beta_product)
+      under = torch.sqrt(var_hat + 1e-12)
 
-      # latent_state = to_tensor(latent_state)
-      # representation_state = to_tensor(network_output.latent_state)
+      ## L_pg_cmpo first term (eq.10)
+      importance_weight = torch.clip(first_P.gather(1, action_traj[:, 0])
+                                     / (P_traj.gather(1, action_traj[:, 0])),
+                                     0, 1
+                                     )
+      first_term = -1 * importance_weight * (G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) / under
 
-      # NOTE: no grad for the representation_state branch.
-      # dynamic_proj = self._learn_model.project(latent_state, with_grad=True)
-      # observation_proj = self._learn_model.project(representation_state, with_grad=False)
-      # temp_loss = negative_cosine_similarity(dynamic_proj, observation_proj) * mask_batch[:, step_k]
+      ## eq. 14. Lookahead inferences (one step look-ahead to some actions to estimate q_prior, from target network)
+      def lookahead(P_tensor, hs, _lookahead_samples):
+        with torch.no_grad():
+          P_np = P_tensor.cpu().numpy()
+          action1_stack_all_samples = np.zeros((len(P_np), _lookahead_samples), dtype=np.int64)
+          for j, p in enumerate(P_np):
+            action1_stack_all_samples[j] = np.random.choice(action_space_arange, p=p, size=_lookahead_samples)  # this is very slow!
+          action1_stack_all_samples = torch.from_numpy(action1_stack_all_samples).T
+          hs, r1 = target.dynamics_network(hs.expand((*action1_stack_all_samples.shape, -1)), action1_stack_all_samples)
+          _, v1 = target.prediction_network(hs)
+          r1_arr = to_scalar(r1)
+          v1_arr = to_scalar(v1)
+          a1_arr = action1_stack_all_samples
+        return r1_arr, v1_arr, a1_arr
 
-      # consistency_loss += temp_loss
+      r1_arr, v1_arr, a1_arr = lookahead(t_first_P, t_first_hs, lookahead_samples)
+      ## z_cmpo_arr (eq.12)
+      with torch.no_grad():
+        exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + gamma * v1_arr[k] - to_scalar(t_first_v_logits)) / under, -1, 1))  # -c, c
+                            .tolist() for k in range(lookahead_samples)]
+        exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
+        z_cmpo_arr = []
+        for k in range(lookahead_samples):  # k != i is fixed by "- exp_clip_adv_arr[k]"
+          z_cmpo = (1 + torch.sum(exp_clip_adv_arr[k], dim=0) - exp_clip_adv_arr[k]) / lookahead_samples
+          z_cmpo_arr.append(z_cmpo.tolist())
+      z_cmpo_arr = torch.tensor(z_cmpo_arr).to(device)
+
+      ## L_pg_cmpo second term (eq.11)
+      second_term = 0
+      for k in range(lookahead_samples):
+        second_term += exp_clip_adv_arr[k] / z_cmpo_arr[k] * torch.log(first_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device)))
+      second_term *= -1 * regularizer_multiplier / lookahead_samples
+
+      ## L_pg_cmpo
+      L_pg_cmpo = first_term + second_term
+
+      ## L_m eq. 13
+      L_m = 0
+      L_consistency = 0.
+      for i in range(unroll_steps):
+        state = state_traj[:, i]
+
+        # this is efficientzero way to get a better inner state
+        dynamic_proj = self.prediction_network.projection(latent_states[i])  # take the dynamics state. really want to have an lstm state here
+        self.prediction_network.prediction_head(dynamic_proj)
+        with torch.no_grad():
+          hs = self.representation_network(state)
+          observation_proj = self.prediction_network.projection(hs)  #
+          observation_proj.detach()
+
+        L_consistency += negative_cosine_similarity(dynamic_proj, observation_proj) * mask_batch[:, i]
+      limited_unroll_steps = 0
+      for i in range(unroll_steps):
+        _mask_batch = mask_batch[:, i + 1]  # we need to mask finished episodes
+        if torch.sum(_mask_batch == 1) < 2:
+          print("Not enough correct steps")
+          break
+        limited_unroll_steps = i+1
+        stacked_state = state_traj[:, i + 1]
+        with torch.no_grad():
+          t_hs = target.representation_network(stacked_state)
+          t_P, t_v_logits = target.prediction_network(t_hs)
+
+        beta_var = 0.99
+        masked_minibatch_size = _mask_batch.sum()
+        self.var_m[i] = beta_var * self.var_m[i] + (1 - beta_var) * (
+            torch.sum(((G_arr_mb[:, i + 1] - to_scalar(t_v_logits)) * _mask_batch) ** 2) / masked_minibatch_size)
+        self.beta_product_m[i] *= beta_var
+        var_hat = self.var_m[i] / (1 - self.beta_product_m[i])
+        under = torch.sqrt(var_hat + 1e-12)
+
+        r1_arr, v1_arr, a1_arr = lookahead(t_P, t_hs, lookahead_samples2)
+
+        # with torch.no_grad():
+        #   r1_arr_temp = []
+        #   v1_arr_temp = []
+        #   a1_arr_temp = []
+        #   t_P_np = t_P.detach().cpu().numpy()
+        #   action1_stack_all_samples = np.zeros((len(t_P_np), lookahead_samples2), dtype=np.int64)
+        #   for j, p in enumerate(t_P_np):
+        #     action1_stack_all_samples[j] = np.random.choice(action_space_arange, p=p, size=lookahead_samples2)  # this is very slow!
+        #   action1_stack_all_samples = torch.from_numpy(action1_stack_all_samples)
+        #
+        #   for k in range(lookahead_samples2):
+        #     action1_stack = action1_stack_all_samples[:, k]
+        #     hs, r1 = target.dynamics_network(t_hs, torch.unsqueeze(action1_stack, 1))
+        #     _, v1 = target.prediction_network(hs)
+        #
+        #     r1_arr_temp.append(to_scalar(r1))
+        #     v1_arr_temp.append(to_scalar(v1))
+        #     a1_arr_temp.append(action1_stack)
+
+        with torch.no_grad():
+          exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + gamma * v1_arr[k] - to_scalar(t_v_logits)) * _mask_batch / under, -1, 1))
+                              .tolist() for k in range(lookahead_samples2)]
+          exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
+
+        # ## Paper appendix F.2 : Prior policy
+        t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((minibatch_size, self.env.action_length())) / self.env.action_length()).to(device)
+        #
+        pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
+                        * exp_clip_adv_arr[k])
+                       .squeeze(-1).tolist() for k in range(lookahead_samples2)]
+
+        pi_cmpo_all = (torch.tensor(pi_cmpo_all).transpose(0, 1).to(device))[_mask_batch.squeeze()==1]
+        pi_cmpo_all = pi_cmpo_all / torch.sum(pi_cmpo_all, dim=1).unsqueeze(-1)
+        kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
+        # # I think this is right. todo but not completely sure
+        P_arr_selected_actions = torch.gather(inferenced_P_arr[i + 1], 1, a1_arr.T.to(device))
+        L_m += kl_loss(torch.log(P_arr_selected_actions)[_mask_batch.squeeze()==1], pi_cmpo_all)
+      if limited_unroll_steps > 0:
+        L_m /= limited_unroll_steps
+
       ## L_v
       ls = nn.LogSoftmax(dim=-1)
-      L_v = 0
-      # for i in range(unroll_steps + 1): L_v += (to_cr(G_arr_mb[:, i]) * ls(v_logits_s[i])).sum(-1, keepdim=True)
-      # print('v_logits_s', v_logits_s[0] - G_arr_mb[:, 0])
-      for i in range(unroll_steps + 1): L_v += (v_logits_s[i] - G_arr_mb[:, i])**2#(to_cr(G_arr_mb[:, i]) * ls(v_logits_s[i])).sum(-1, keepdim=True)
-      # L_v += (to_cr(G_arr_mb[:, i]) * ls(v_logits_s[i])).sum(-1, keepdim=True)
-      # L_v = -1 * L_v
+      L_v_dist = 0
+      L_v = 0.
+      # todo this might be a weird mean,  if some of them are zerod out. (But grads stay very similar though)
+      for i in range(unroll_steps + 1): L_v_dist -= (to_cr(G_arr_mb[:, i]) * ls(v_logits_s[i])).sum(-1, keepdim=True) * mask_batch[:, i]
+      # Just for statistics:
+      for i in range(unroll_steps + 1): L_v += (to_scalar(v_logits_s[i]) - G_arr_mb[:, i]) ** 2 * mask_batch[:, i]
       print('L_v', L_v.mean().item())
+      # ## consistency_loss
+      print('consistency_loss', L_consistency.mean().item())
+
       # ## L_r
-      # L_r = 0.
-      # for i in range(unroll_steps): L_r += (to_cr(r_traj[:, i]) * ls(r_logits_s[i])).sum(-1, keepdim=True)
-      # L_r = -1 * L_r
-      # ## start of dynamics network gradient *0.5
-      # for i in range(unroll_steps + 1): hs_s[i].register_hook(lambda grad: grad * 0.5)
+      L_r = 0.
+      for i in range(unroll_steps): L_r -= (to_cr(r_traj[:, i]) * ls(r_logits_s[i])).sum(-1, keepdim=True)
+      ## start of dynamics network gradient *0.5 # todo weird?
+      # for i in range(unroll_steps + 1): latent_states[i].register_hook(lambda grad: grad * 0.5)
 
       ## total loss
       # L_total = L_pg_cmpo + L_v / (unroll_steps + 1) / 4 + L_r / unroll_steps / 1 + L_m
-      L_total = L_v
+      L_total = L_pg_cmpo + L_v_dist + L_consistency + L_r + L_m
       ## optimize
       self.optimizer.zero_grad()
       L_total.mean().backward()
@@ -823,8 +769,8 @@ class Agent(nn.Module):
       self.optimizer.step()
 
       ## target network(prior parameters) moving average update
-      params1 = self.named_parameters()
-      params2 = target.named_parameters()
+      params1 = list(self.named_parameters()) + list(self.named_buffers())
+      params2 = list(target.named_parameters()) + list(target.named_buffers())
       dict_params2 = dict(params2)
       for name1, param1 in params1:
         if name1 in dict_params2:
@@ -832,12 +778,14 @@ class Agent(nn.Module):
       target.load_state_dict(dict_params2)
 
     self.scheduler.step()
-
+    print('L_total', L_total.mean().item())
     writer.add_scalar('Loss/L_total', L_total.mean(), global_i)
     # writer.add_scalar('Loss/L_pg_cmpo', L_pg_cmpo.mean(), global_i)
+    writer.add_scalar('Loss/L_consistency', (L_consistency / unroll_steps).mean(), global_i)
     writer.add_scalar('Loss/L_v', (L_v / (unroll_steps + 1) / 4).mean(), global_i)
-    # writer.add_scalar('Loss/L_r', (L_r / unroll_steps / 1).mean(), global_i)
-    # writer.add_scalar('Loss/L_m', (L_m).mean(), global_i)
+    writer.add_scalar('Loss/L_v_dist', (L_v_dist / (unroll_steps + 1) / 4).mean(), global_i)
+    writer.add_scalar('Loss/L_r', (L_r / unroll_steps / 1).mean(), global_i)
+    writer.add_scalar('Loss/L_m', (L_m).mean(), global_i)
     # writer.add_scalars('vars', {'self.var': self.var,
     #                             'self.var_m': self.var_m[0]
     #                             }, global_i)
@@ -850,7 +798,7 @@ score_arr_handcoded = []
 ast_strs = load_worlds()
 random.shuffle(ast_strs)
 
-first_ast_nums_correct = list(range(10))
+first_ast_nums_correct = list(range(50))
 # for i in deepcopy(first_ast_nums_correct):
 #   try:
 #     env = State(ast_strs, i)
@@ -862,7 +810,7 @@ first_ast_nums_correct = list(range(10))
 #     del env
 #     del first_ast_nums_correct[i]
 first_ast_nums = len(first_ast_nums_correct)
-num_replays = 32
+num_replays = 33  # todo
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 max_trials = 1
@@ -872,7 +820,7 @@ num_state_stack = 1
 
 test_size = 1
 train_updates = 10
-episodes_per_train_update = 4
+episodes_per_train_update = 1  # was 4
 episodes_per_eval = 40
 start_training_epoch = episodes_per_train_update  # todo set higher
 assert start_training_epoch >= episodes_per_train_update
@@ -890,12 +838,14 @@ observation_space = env.feature_shape()
 env.base_tm = -1
 assert observation_space[0] == len(env.feature())
 action_space = env.action_length()
+action_space_arange = np.arange(action_space)
+
 episode_nums = 2000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
 # exp_str = 'test_no_transformer_'+timing_str # 1,
 # exp_str = 'test_new_transformer_less_training_updates'+timing_str # 1,
-exp_str = f'test_more_trials_sts{use_sts}_astnums{first_ast_nums_correct}' + timing_str  # 1,
+exp_str = f'test_more_trials_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
 del env
 target = Target(observation_space[0], action_space, 1024)
 target.eval()
@@ -955,8 +905,8 @@ for i in range(episode_nums):
   score_arr.append(game_score)
   score_arr_handcoded.append(more_than_handcoded)
 
-  if i % 100 == 0:
-    torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
+  # if i % 100 == 0:
+  #   torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
 
   # if mean_score > 250 and np.mean(np.array(score_arr[-5:])) > 250:
   #   torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
