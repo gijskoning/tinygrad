@@ -394,7 +394,7 @@ class Agent(nn.Module):
     self.var_m = [0 for _ in range(unroll_steps)]
     self.beta_product_m = [1.0 for _ in range(unroll_steps)]
 
-  def self_play_mu(self, target: Target, ast_num=None, eval=False, episode_num=0):
+  def self_play_mu(self, target: Target, ast_num=None, evaluation=False, episode_num=0):
     """Self-play and save trajectory to replay buffer
 
     (Originally target network used to inference policy, but i used agent network instead) # todo
@@ -403,8 +403,7 @@ class Agent(nn.Module):
     -> sampling action follow policy -> next env step
     """
     mcts_temperature = max(0.25*0.99 ** episode_num, 0.01)
-    eps_greedy_exploration_in_collect = False
-    cfg = dict(num_simulations=15 if not eval else 20,
+    cfg = dict(num_simulations=15 if not evaluation else 20,
                discount_factor=gamma,
                device=device)
     mcts_tree = EfficientZeroMCTSPtree(EasyDict(cfg))
@@ -412,7 +411,6 @@ class Agent(nn.Module):
     if ast_num is None:
       ast_num = np.random.choice(first_ast_nums_correct)
 
-    # print('running astnum', ast_num)
     self.env = State(ast_strs, ast_num)
     base_tm = self.env.set_base_tm()
     state_feature = self.env.feature()
@@ -440,52 +438,42 @@ class Agent(nn.Module):
       action_mask = np.zeros((1, action_space))
       action_mask[0, legal_actions[0]] = 1
       parallel_num = 1
+      greedy = not evaluation and (episode_num < 50 or np.random.rand() < 0.1)
+      if greedy:
+        results = []
+        for action in legal_actions[0]:
+          new_env, state_feature, r, done, info = self.env.step(action, dense_reward=True)  # todo might want to change to "not eval"
+          v = 0.
+          results.append((new_env, state_feature, r, done, info, action, v))
+        best = np.argmax([result[2] for result in results])
+        self.env, state_feature, r, done, info, action, _ = results[best]
+      else:
+        roots = EfficientZeroMCTSPtree.roots(parallel_num, legal_actions)
+        noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[j])
+                                      ).astype(np.float32).tolist() for j in range(parallel_num)]
 
-      roots = EfficientZeroMCTSPtree.roots(parallel_num, legal_actions)
-      noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[j])
-                                    ).astype(np.float32).tolist() for j in range(parallel_num)]
-
-      roots.prepare(mcts_tree._cfg.root_noise_weight, noises, probs.reshape(1, -1))
-      # we have no reward_hidden_state_roots. we just have a single latent
-      latent_state = hs  # (the hidden state in latent space)
-      # latent_state = None # this requires an lstm that we dont have
-      mcts_tree.search(roots, target, latent_state.detach().cpu().numpy().reshape(1, -1))
-      roots_visit_count_distributions = roots.get_distributions()
-      roots_values = roots.get_values()  # shape: {list: batch_size}
-      ready_env_id = None
-      if ready_env_id is None:
-        ready_env_id = np.arange(parallel_num)
-      action = -1
-      for i, env_id in enumerate(ready_env_id):  # currently only 1 thing
-        distributions, value = roots_visit_count_distributions[i], roots_values[i]
-        # normal collect
-        # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
-        # the index within the legal action set, rather than the index in the entire action set.
-        action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
-          distributions, temperature=mcts_temperature, deterministic=eval
-        )
-        # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the entire action set.
-        action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
-      # for j in range(1):
-      #   # for j in range(1):
-      #   action, probs = self.env.get_valid_action(probs, select_best=eval)
-      #   probs[action] = 0
-      #   new_env, state_feature, r, done, info = self.env.step(action, dense_reward=True)# todo might want to change to "not eval"
-      #   with torch.no_grad():
-      #     hs = target.representation_network(torch.from_numpy(state_feature).to(device))
-      #     _, v_logits = target.prediction_network(hs)
-      #     v = to_scalar(v_logits.unsqueeze(0)).item()
-      #   results.append((new_env, state_feature, r, done, info, action, v))
-      #   # results.append((new_env, state_feature, r, done, info, action,to_scalar(v.unsqueeze(0)).item()))
-      #   if probs.sum() == 0:
-      #     break
-      #   probs /= probs.sum()
-      # best = np.argmax([result[2] for result in results])
-      # best_v = np.argmax([result[-1] for result in results])
-      # best_v_val = np.max([result[-1] for result in results])
-      # # print('best i', best, 'best v', best_v, 'best_v_val',best_v_val.item())
-      # self.env, state_feature, r, done, info, action, _ = results[best]
-      self.env, state_feature, r, done, info = self.env.step(action, dense_reward=True)
+        roots.prepare(mcts_tree._cfg.root_noise_weight, noises, probs.reshape(1, -1))
+        # we have no reward_hidden_state_roots. we just have a single latent
+        latent_state = hs  # (the hidden state in latent space)
+        # latent_state = None # this requires an lstm that we dont have
+        mcts_tree.search(roots, target, latent_state.detach().cpu().numpy().reshape(1, -1))
+        roots_visit_count_distributions = roots.get_distributions()
+        roots_values = roots.get_values()  # shape: {list: batch_size}
+        ready_env_id = None
+        if ready_env_id is None:
+          ready_env_id = np.arange(parallel_num)
+        action = -1
+        for i, env_id in enumerate(ready_env_id):  # currently only 1 thing
+          distributions, value = roots_visit_count_distributions[i], roots_values[i]
+          # normal collect
+          # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
+          # the index within the legal action set, rather than the index in the entire action set.
+          action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
+            distributions, temperature=mcts_temperature, deterministic=evaluation
+          )
+          # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the entire action set.
+          action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
+        self.env, state_feature, r, done, info = self.env.step(action, dense_reward=True)
       if i == 0:
         for _ in range(num_state_stack):
           state_traj.append(current_state_state)
@@ -508,7 +496,7 @@ class Agent(nn.Module):
     for _ in range(unroll_steps + 1):
       r_traj.append(0.0)
       action_traj.append(-1)
-    if not eval:
+    if not evaluation:
       # traj append to replay
       self.state_replay.append(state_traj)
       self.action_replay.append(action_traj)
@@ -520,8 +508,8 @@ class Agent(nn.Module):
     base_to_beam = ((base_tm - beam_results[ast_num]) / base_tm) if beam else None
     return game_score, base_to_handcoded, base_to_beam, r, last_frame, ast_num
 
-  from line_profiler_pycharm import profile
-  @profile
+  # from line_profiler_pycharm import profile
+  # @profile
   def update_weights_mu(self, target: Target, episode_num):
     """Optimize network weights.
 
@@ -535,7 +523,6 @@ class Agent(nn.Module):
     regularizer_multiplier: 5
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
-    tt = time.perf_counter()
     for _ in range(train_updates):
       state_traj_i = []
       state_traj = []
@@ -789,7 +776,7 @@ train_eval_size = 10
 test_size = 5
 train_updates = 2
 episodes_per_train_update = 4  # was 4
-episodes_per_eval = 64
+episodes_per_eval = 256
 start_training_epoch = episodes_per_train_update  # todo set higher
 assert start_training_epoch >= episodes_per_train_update
 use_transformer = True
@@ -815,7 +802,8 @@ timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_new_transformer_less_training_updates'+timing_str # 1,
 # exp_str = f'greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
 # exp_str = f'0.5greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
-exp_str = f'no_greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
+# exp_str = f'no_greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
+exp_str = f'partially_greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
 del env
 target = Target(observation_space[0], action_space, 1024)
 target.eval()
@@ -898,14 +886,14 @@ for i in range(episode_nums):
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
     scores, test_scores = [], []
     for i in np.random.choice(first_ast_nums_correct[:-test_size], size=train_eval_size):  # eval
-      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
+      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, evaluation=True)
       more_than_handcoded = game_score - base_to_handcoded
       if beam:
         more_than_beam = game_score - base_to_beam
 
       scores.append([game_score, more_than_handcoded, base_to_beam])
     for i in first_ast_nums_correct[-test_size:]:  # eval
-      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
+      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, evaluation=True)
       more_than_handcoded = game_score - base_to_handcoded
       if beam:
         more_than_beam = game_score - base_to_beam
