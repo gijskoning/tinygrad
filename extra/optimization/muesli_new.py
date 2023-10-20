@@ -787,9 +787,9 @@ num_state_stack = 1
 
 train_eval_size = 10
 test_size = 5
-train_updates = 10
+train_updates = 2
 episodes_per_train_update = 4  # was 4
-episodes_per_eval = 32
+episodes_per_eval = 64
 start_training_epoch = episodes_per_train_update  # todo set higher
 assert start_training_epoch >= episodes_per_train_update
 use_transformer = True
@@ -868,8 +868,8 @@ for i in range(episode_nums):
   # diff_best_handcoded = best_ast_num_scores - handcoded_best_ast_num_scores
   # print('Diff with best handcoded scores for each ast num', (diff_best_handcoded).round(2).tolist())
   # print('mean diff', diff_best_handcoded.mean().round(2).tolist())
-  writer.add_scalar('relative_to_base_score', game_score, global_i)
-  writer.add_scalar('more_than_handcoded', more_than_handcoded, global_i)
+  writer.add_scalar('relative_to_base_score', max(game_score, -1), global_i)
+  writer.add_scalar('more_than_handcoded', max(more_than_handcoded, -1), global_i)
   # writer.add_scalar('diff_to_best_handcoded', diff_best_handcoded.mean(), global_i)
 
   score_arr.append(game_score)
