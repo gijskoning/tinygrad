@@ -358,7 +358,10 @@ reward and value of entire trajectories. Support_size 30 can cover almost [-900,
 support_size = 300  # efficientzero even has 300 here
 eps = 0.001
 from line_profiler_pycharm import profile
+
 support_tensor = None
+
+
 @profile
 def to_scalar(x):
   global support_tensor
@@ -482,16 +485,16 @@ class Agent(nn.Module):
       # probs = P.detach().cpu().numpy()
       probs = np.ones((self.action_space)) / self.action_space
       results = []
+
       for j in range(action_space):
+        # for j in range(1):
         action, probs = self.env.get_valid_action(probs, select_best=eval)
         probs[action] = 0
         new_env, state_feature, r, done, info = self.env.step(action, dense_reward=not eval)
         with torch.no_grad():
           hs = target.representation_network(torch.from_numpy(state_feature).to(device))
           _, v_logits = target.prediction_network(hs)
-          # if j == 0:
           v = to_scalar(v_logits.unsqueeze(0)).item()
-          # print('v', v, 'r', r)
         results.append((new_env, state_feature, r, done, info, action, v))
         # results.append((new_env, state_feature, r, done, info, action,to_scalar(v.unsqueeze(0)).item()))
         if probs.sum() == 0:
@@ -535,6 +538,7 @@ class Agent(nn.Module):
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
     base_to_beam = ((base_tm - beam_results[ast_num]) / base_tm) if beam else None
     return game_score, base_to_handcoded, base_to_beam, r, last_frame, ast_num
+
   from line_profiler_pycharm import profile
   @profile
   def update_weights_mu(self, target: Target):
@@ -550,6 +554,7 @@ class Agent(nn.Module):
     regularizer_multiplier: 5
     Loss: L_pg_cmpo + L_v/6/4 + L_r/5/1 + L_m
     """
+    tt = time.perf_counter()
     for _ in range(train_updates):
       state_traj_i = []
       state_traj = []
@@ -629,7 +634,7 @@ class Agent(nn.Module):
       first_term = -1 * importance_weight * (G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) / under
 
       ## eq. 14. Lookahead inferences (one step look-ahead to some actions to estimate q_prior, from target network)
-      def lookahead(P_tensor, hs, _lookahead_samples):
+      def lookahead(P_tensor, hs, _lookahead_samples, base_v_logits):
         with torch.no_grad():
           P_np = P_tensor.cpu().numpy()
           action1_stack_all_samples = np.zeros((len(P_np), _lookahead_samples), dtype=np.int64)
@@ -641,14 +646,14 @@ class Agent(nn.Module):
           r1_arr = to_scalar(r1)
           v1_arr = to_scalar(v1)
           a1_arr = action1_stack_all_samples
-        return r1_arr, v1_arr, a1_arr
 
-      r1_arr, v1_arr, a1_arr = lookahead(t_first_P, t_first_hs, lookahead_samples)
+          torch.exp(torch.clip((r1_arr + gamma * v1_arr - to_scalar(base_v_logits)) / under, -1, 1))
+          exp_clip_adv_arr = torch.exp(torch.clip((r1_arr + gamma * v1_arr - to_scalar(base_v_logits)) / under, -1, 1))
+        return r1_arr, v1_arr, a1_arr, exp_clip_adv_arr
+
+      r1_arr, v1_arr, a1_arr, exp_clip_adv_arr = lookahead(t_first_P, t_first_hs, lookahead_samples, t_first_v_logits)
       ## z_cmpo_arr (eq.12)
       with torch.no_grad():
-        exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + gamma * v1_arr[k] - to_scalar(t_first_v_logits)) / under, -1, 1))  # -c, c
-                            .tolist() for k in range(lookahead_samples)]
-        exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
         z_cmpo_arr = []
         for k in range(lookahead_samples):  # k != i is fixed by "- exp_clip_adv_arr[k]"
           z_cmpo = (1 + torch.sum(exp_clip_adv_arr[k], dim=0) - exp_clip_adv_arr[k]) / lookahead_samples
@@ -679,13 +684,14 @@ class Agent(nn.Module):
           observation_proj.detach()
 
         L_consistency += negative_cosine_similarity(dynamic_proj, observation_proj) * mask_batch[:, i]
+
       limited_unroll_steps = 0
       for i in range(unroll_steps):
         _mask_batch = mask_batch[:, i + 1]  # we need to mask finished episodes
         if torch.sum(_mask_batch == 1) < 2:
           print("Not enough correct steps")
           break
-        limited_unroll_steps = i+1
+        limited_unroll_steps = i + 1
         stacked_state = state_traj[:, i + 1]
         with torch.no_grad():
           t_hs = target.representation_network(stacked_state)
@@ -694,50 +700,27 @@ class Agent(nn.Module):
         beta_var = 0.99
         masked_minibatch_size = _mask_batch.sum()
         self.var_m[i] = beta_var * self.var_m[i] + (1 - beta_var) * (
-            torch.sum(((G_arr_mb[:, i + 1] - to_scalar(t_v_logits)) * _mask_batch) ** 2) / masked_minibatch_size)
+          torch.sum(((G_arr_mb[:, i + 1] - to_scalar(t_v_logits)) * _mask_batch) ** 2) / masked_minibatch_size)
         self.beta_product_m[i] *= beta_var
         var_hat = self.var_m[i] / (1 - self.beta_product_m[i])
         under = torch.sqrt(var_hat + 1e-12)
 
-        r1_arr, v1_arr, a1_arr = lookahead(t_P, t_hs, lookahead_samples2)
+        r1_arr, v1_arr, a1_arr, exp_clip_adv_arr = lookahead(t_P, t_hs, lookahead_samples2, t_v_logits)
 
-        # with torch.no_grad():
-        #   r1_arr_temp = []
-        #   v1_arr_temp = []
-        #   a1_arr_temp = []
-        #   t_P_np = t_P.detach().cpu().numpy()
-        #   action1_stack_all_samples = np.zeros((len(t_P_np), lookahead_samples2), dtype=np.int64)
-        #   for j, p in enumerate(t_P_np):
-        #     action1_stack_all_samples[j] = np.random.choice(action_space_arange, p=p, size=lookahead_samples2)  # this is very slow!
-        #   action1_stack_all_samples = torch.from_numpy(action1_stack_all_samples)
-        #
-        #   for k in range(lookahead_samples2):
-        #     action1_stack = action1_stack_all_samples[:, k]
-        #     hs, r1 = target.dynamics_network(t_hs, torch.unsqueeze(action1_stack, 1))
-        #     _, v1 = target.prediction_network(hs)
-        #
-        #     r1_arr_temp.append(to_scalar(r1))
-        #     v1_arr_temp.append(to_scalar(v1))
-        #     a1_arr_temp.append(action1_stack)
-
-        with torch.no_grad():
-          exp_clip_adv_arr = [torch.exp(torch.clip((r1_arr[k] + gamma * v1_arr[k] - to_scalar(t_v_logits)) * _mask_batch / under, -1, 1))
-                              .tolist() for k in range(lookahead_samples2)]
-          exp_clip_adv_arr = torch.tensor(exp_clip_adv_arr).to(device)
-
+        exp_clip_adv_arr = exp_clip_adv_arr * _mask_batch
         # ## Paper appendix F.2 : Prior policy
         t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((minibatch_size, self.env.action_length())) / self.env.action_length()).to(device)
-        #
+
         pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
                         * exp_clip_adv_arr[k])
                        .squeeze(-1).tolist() for k in range(lookahead_samples2)]
 
-        pi_cmpo_all = (torch.tensor(pi_cmpo_all).transpose(0, 1).to(device))[_mask_batch.squeeze()==1]
+        pi_cmpo_all = (torch.tensor(pi_cmpo_all).transpose(0, 1).to(device))[_mask_batch.squeeze() == 1]
         pi_cmpo_all = pi_cmpo_all / torch.sum(pi_cmpo_all, dim=1).unsqueeze(-1)
         kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
         # # I think this is right. todo but not completely sure
         P_arr_selected_actions = torch.gather(inferenced_P_arr[i + 1], 1, a1_arr.T.to(device))
-        L_m += kl_loss(torch.log(P_arr_selected_actions)[_mask_batch.squeeze()==1], pi_cmpo_all)
+        L_m += kl_loss(torch.log(P_arr_selected_actions)[_mask_batch.squeeze() == 1], pi_cmpo_all)
       if limited_unroll_steps > 0:
         L_m /= limited_unroll_steps
 
@@ -810,7 +793,7 @@ first_ast_nums_correct = list(range(50))
 #     del env
 #     del first_ast_nums_correct[i]
 first_ast_nums = len(first_ast_nums_correct)
-num_replays = 33  # todo
+num_replays = 32
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 max_trials = 1
