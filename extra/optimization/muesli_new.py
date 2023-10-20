@@ -5,11 +5,12 @@ import shelve
 import time
 from datetime import datetime
 
-import transformers
+from easydict import EasyDict
 from torch.utils.tensorboard import SummaryWriter
-from transformers import GPT2Model
 
 from extra.optimization.efficientzero_funcs import negative_cosine_similarity
+from extra.optimization.mcts_ptree import EfficientZeroMCTSPtree, select_action
+from extra.optimization.muesli_funcs import support_size, to_cr, to_scalar
 
 os.environ["GPU"] = '1'
 # os.environ["PYOPENCL_NO_CACHE"] = '1'
@@ -31,7 +32,7 @@ from torch_poly_lr_decay import PolynomialLRDecay
 
 from extra.optimization.helpers import MAX_DIMS, ast_str_to_lin, lin_to_feats, load_worlds
 from tinygrad.codegen import search
-from tinygrad.codegen.search import beam_search, bufs_from_lin, time_linearizer
+from tinygrad.codegen.search import beam_search, bufs_from_lin, get_linearizer_actions, time_linearizer
 
 
 @functools.lru_cache(None)
@@ -116,7 +117,9 @@ class State:
       if self._reward is None:
         tm = time_linearizer(self.lin, rawbufs)
         assert not math.isinf(tm)
-        self._reward = (self.last_tm - tm) / self.base_tm
+        # we clip the rewards to ensure stability. Note:
+        self._reward = max((self.last_tm - tm) / self.base_tm, -5.)
+
         self.last_tm = tm
     except AssertionError as e:
       self._reward = -self.base_tm
@@ -349,58 +352,6 @@ class Prediction(nn.Module):
     return P, V
 
 
-"""
-For categorical representation
-reference : https://github.com/werner-duvaud/muzero-general
-In my opinion, support size have to cover the range of maximum absolute value of 
-reward and value of entire trajectories. Support_size 30 can cover almost [-900,900].
-"""
-support_size = 300  # efficientzero even has 300 here
-eps = 0.001
-from line_profiler_pycharm import profile
-
-support_tensor = None
-
-
-@profile
-def to_scalar(x):
-  global support_tensor
-  x = torch.softmax(x, dim=-1)
-  probabilities = x
-  if support_tensor is None:
-    support_tensor = (torch.tensor([x for x in range(-support_size, support_size + 1)]).expand(probabilities.shape).float().to(device))
-  x = torch.sum(support_tensor * probabilities, dim=-1, keepdim=True)
-  scalar = torch.sign(x) * (((torch.sqrt(1 + 4 * eps * (torch.abs(x) + 1 + eps)) - 1) / (2 * eps)) ** 2 - 1)
-  return scalar
-
-
-def to_scalar_no_soft(x):  ## test purpose
-  probabilities = x
-  support = (torch.tensor([x for x in range(-support_size, support_size + 1)]).expand(probabilities.shape).float().to(device))
-  x = torch.sum(support * probabilities, dim=1, keepdim=True)
-  scalar = torch.sign(x) * (((torch.sqrt(1 + 4 * eps * (torch.abs(x) + 1 + eps)) - 1) / (2 * eps)) ** 2 - 1)
-  return scalar
-
-
-def to_cr(x):
-  x = x.squeeze(-1).unsqueeze(0)
-  x = torch.sign(x) * (torch.sqrt(torch.abs(x) + 1) - 1) + eps * x
-  x = torch.clip(x, -support_size, support_size)
-  floor = x.floor()
-  under = x - floor
-  floor_prob = (1 - under)
-  under_prob = under
-  floor_index = floor + support_size
-  under_index = floor + support_size + 1
-  logits = torch.zeros(x.shape[0], x.shape[1], 2 * support_size + 1).type(torch.float32).to(device)
-  logits.scatter_(2, floor_index.long().unsqueeze(-1), floor_prob.unsqueeze(-1))
-  under_prob = under_prob.masked_fill_(2 * support_size < under_index, 0.0)
-  under_index = under_index.masked_fill_(2 * support_size < under_index, 0.0)
-  logits.scatter_(2, under_index.long().unsqueeze(-1), under_prob.unsqueeze(-1))
-  return logits.squeeze(0)
-
-
-##Target network
 class Target(nn.Module):
   """Target Network
 
@@ -417,7 +368,6 @@ class Target(nn.Module):
     self.to(device)
 
 
-##Muesli agent
 class Agent(nn.Module):
   """Agent Class"""
 
@@ -444,7 +394,7 @@ class Agent(nn.Module):
     self.var_m = [0 for _ in range(unroll_steps)]
     self.beta_product_m = [1.0 for _ in range(unroll_steps)]
 
-  def self_play_mu(self, target: Target, ast_num=None, eval=False, max_timestep=10000):
+  def self_play_mu(self, target: Target, ast_num=None, eval=False, episode_num=0):
     """Self-play and save trajectory to replay buffer
 
     (Originally target network used to inference policy, but i used agent network instead) # todo
@@ -452,6 +402,12 @@ class Agent(nn.Module):
     Eight previous observations stacked -> representation network -> prediction network
     -> sampling action follow policy -> next env step
     """
+    mcts_temperature = max(0.25*0.99 ** episode_num, 0.01)
+    eps_greedy_exploration_in_collect = False
+    cfg = dict(num_simulations=15 if not eval else 20,
+               discount_factor=gamma,
+               device=device)
+    mcts_tree = EfficientZeroMCTSPtree(EasyDict(cfg))
     # state = self.env#.reset()no reset for now
     if ast_num is None:
       ast_num = np.random.choice(first_ast_nums_correct)
@@ -482,29 +438,73 @@ class Agent(nn.Module):
         # print('time for representation', time.perf_counter() - st)
         P, v = target.prediction_network(hs)
         # P, v = target.prediction_network(torch.from_numpy(state_feature).to(device))
-      # probs = P.detach().cpu().numpy()
-      probs = np.ones((self.action_space)) / self.action_space
+      probs = P.detach().cpu().numpy()
+      # probs = np.ones((self.action_space)) / self.action_space
       results = []
+      greedy_factor = 0.5
+      new_action_space = int(action_space * greedy_factor)
+      action_mask2 = np.arange(action_space).reshape(1, -1)  # todo now all actions are legal
+      legal_actions = [list(get_linearizer_actions(self.env.lin).keys())]  # todo get_linearizer_actions is slow might improve
+      action_mask = np.zeros((1, action_space))
+      action_mask[0, legal_actions[0]] = 1
+      # print('action_mask', action_mask, 'action_mask2', action_mask2)
+      parallel_num = 1
+      # legal_actions = [[i for i, x in enumerate(action_mask[j]) if x == 1] for j in range(parallel_num)]
 
-      for j in range(action_space):
-        # for j in range(1):
-        action, probs = self.env.get_valid_action(probs, select_best=eval)
-        probs[action] = 0
-        new_env, state_feature, r, done, info = self.env.step(action, dense_reward=not eval)
-        with torch.no_grad():
-          hs = target.representation_network(torch.from_numpy(state_feature).to(device))
-          _, v_logits = target.prediction_network(hs)
-          v = to_scalar(v_logits.unsqueeze(0)).item()
-        results.append((new_env, state_feature, r, done, info, action, v))
-        # results.append((new_env, state_feature, r, done, info, action,to_scalar(v.unsqueeze(0)).item()))
-        if probs.sum() == 0:
-          break
-        probs /= probs.sum()
-      best = np.argmax([result[2] for result in results])
-      best_v = np.argmax([result[-1] for result in results])
-      best_v_val = np.max([result[-1] for result in results])
-      # print('best i', best, 'best v', best_v, 'best_v_val',best_v_val.item())
-      self.env, state_feature, r, done, info, action, _ = results[best]
+      roots = EfficientZeroMCTSPtree.roots(parallel_num, legal_actions)
+      noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[j])
+                                    ).astype(np.float32).tolist() for j in range(parallel_num)]
+
+      roots.prepare(mcts_tree._cfg.root_noise_weight, noises, probs.reshape(1, -1))
+      # we have no reward_hidden_state_roots. we just have a single latent
+      latent_state = hs  # (the hidden state in latent space)
+      # latent_state = None # this requires an lstm that we dont have
+      mcts_tree.search(roots, target, latent_state.detach().cpu().numpy().reshape(1, -1))
+      roots_visit_count_distributions = roots.get_distributions()
+      roots_values = roots.get_values()  # shape: {list: batch_size}
+      ready_env_id = None
+      if ready_env_id is None:
+        ready_env_id = np.arange(parallel_num)
+      action = -1
+      for i, env_id in enumerate(ready_env_id):  # currently only 1 thing
+        distributions, value = roots_visit_count_distributions[i], roots_values[i]
+        if eps_greedy_exploration_in_collect:
+          # eps-greedy collect
+          action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
+            distributions, temperature=mcts_temperature, deterministic=True
+          )
+          action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
+          if np.random.rand() < self.collect_epsilon:
+            action = np.random.choice(legal_actions[i])
+        else:
+          # normal collect
+          # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
+          # the index within the legal action set, rather than the index in the entire action set.
+          action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
+            distributions, temperature=mcts_temperature, deterministic=eval
+          )
+          # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the entire action set.
+          action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
+      # for j in range(1):
+      #   # for j in range(1):
+      #   action, probs = self.env.get_valid_action(probs, select_best=eval)
+      #   probs[action] = 0
+      #   new_env, state_feature, r, done, info = self.env.step(action, dense_reward=True)# todo might want to change to "not eval"
+      #   with torch.no_grad():
+      #     hs = target.representation_network(torch.from_numpy(state_feature).to(device))
+      #     _, v_logits = target.prediction_network(hs)
+      #     v = to_scalar(v_logits.unsqueeze(0)).item()
+      #   results.append((new_env, state_feature, r, done, info, action, v))
+      #   # results.append((new_env, state_feature, r, done, info, action,to_scalar(v.unsqueeze(0)).item()))
+      #   if probs.sum() == 0:
+      #     break
+      #   probs /= probs.sum()
+      # best = np.argmax([result[2] for result in results])
+      # best_v = np.argmax([result[-1] for result in results])
+      # best_v_val = np.max([result[-1] for result in results])
+      # # print('best i', best, 'best v', best_v, 'best_v_val',best_v_val.item())
+      # self.env, state_feature, r, done, info, action, _ = results[best]
+      self.env, state_feature, r, done, info = self.env.step(action, dense_reward=True)
       if i == 0:
         for _ in range(num_state_stack):
           state_traj.append(current_state_state)
@@ -533,7 +533,7 @@ class Agent(nn.Module):
       self.action_replay.append(action_traj)
       self.P_replay.append(P_traj)
       self.r_replay.append(r_traj)
-
+    self.env.reward()  # set last_tm
     game_score = (base_tm - self.env.last_tm) / base_tm
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
     base_to_beam = ((base_tm - beam_results[ast_num]) / base_tm) if beam else None
@@ -763,7 +763,7 @@ class Agent(nn.Module):
     self.scheduler.step()
     print('L_total', L_total.mean().item())
     writer.add_scalar('Loss/L_total', L_total.mean(), global_i)
-    # writer.add_scalar('Loss/L_pg_cmpo', L_pg_cmpo.mean(), global_i)
+    writer.add_scalar('Loss/L_pg_cmpo', L_pg_cmpo.mean(), global_i)
     writer.add_scalar('Loss/L_consistency', (L_consistency / unroll_steps).mean(), global_i)
     writer.add_scalar('Loss/L_v', (L_v / (unroll_steps + 1) / 4).mean(), global_i)
     writer.add_scalar('Loss/L_v_dist', (L_v_dist / (unroll_steps + 1) / 4).mean(), global_i)
@@ -793,7 +793,7 @@ first_ast_nums_correct = list(range(50))
 #     del env
 #     del first_ast_nums_correct[i]
 first_ast_nums = len(first_ast_nums_correct)
-num_replays = 32
+num_replays = 64
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 max_trials = 1
@@ -801,10 +801,11 @@ use_sts = True
 max_episode_length = MAX_DIMS * max_trials
 num_state_stack = 1
 
-test_size = 1
+train_eval_size = 10
+test_size = 5
 train_updates = 10
-episodes_per_train_update = 1  # was 4
-episodes_per_eval = 40
+episodes_per_train_update = 4  # was 4
+episodes_per_eval = 32
 start_training_epoch = episodes_per_train_update  # todo set higher
 assert start_training_epoch >= episodes_per_train_update
 use_transformer = True
@@ -828,7 +829,9 @@ timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
 # exp_str = 'test_no_transformer_'+timing_str # 1,
 # exp_str = 'test_new_transformer_less_training_updates'+timing_str # 1,
-exp_str = f'test_more_trials_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
+# exp_str = f'greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
+# exp_str = f'0.5greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
+exp_str = f'no_greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
 del env
 target = Target(observation_space[0], action_space, 1024)
 target.eval()
@@ -869,7 +872,7 @@ if beam:
 for i in range(episode_nums):
   writer = SummaryWriter(log_dir=f'scalar{exp_str}/')
   global_i = i
-  game_score, base_to_handcoded, base_to_beam, last_r, frame, ast_num = agent.self_play_mu(target)
+  game_score, base_to_handcoded, base_to_beam, last_r, frame, ast_num = agent.self_play_mu(target, episode_num=i)
   more_than_handcoded = game_score - base_to_handcoded
   ast_num_i = first_ast_nums_correct.index(ast_num)
   if best_ast_num_scores[ast_num_i] < game_score:
@@ -900,35 +903,36 @@ for i in range(episode_nums):
     agent.update_weights_mu(target)
     print("Done update")
 
+  best_score_related_to_handcoded = (best_ast_num_scores - handcoded_best_ast_num_scores)[best_ast_num_scores != 0.]
+  writer.add_scalar('best_found_score_related_to_handcoded', best_score_related_to_handcoded.mean(), global_i)
   if i % episodes_per_eval == 0 and i >= start_training_epoch:
     print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
-    best_score_related_to_handcoded = (best_ast_num_scores - handcoded_best_ast_num_scores)[best_ast_num_scores != 0.]
-    writer.add_scalar('best_found_score_related_to_handcoded', best_score_related_to_handcoded.mean(), global_i)
     mean_score = np.mean(np.array(score_arr[i - 30:i + 1]))
     more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i + 1]))
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
     scores, test_scores = [], []
-    # for i in first_ast_nums_correct[:-test_size]:  # eval
-    #   game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
-    #   more_than_handcoded = game_score - base_to_handcoded
-    #   if beam:
-    #     more_than_beam = game_score - base_to_beam
-    #
-    #   scores.append([game_score, more_than_handcoded, base_to_beam])
-    # for i in first_ast_nums_correct[-test_size:]:  # eval
-    #   game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
-    #   more_than_handcoded = game_score - base_to_handcoded
-    #   if beam:
-    #     more_than_beam = game_score - base_to_beam
-    #
-    #   test_scores.append([game_score, more_than_handcoded, base_to_beam])
-    # scores = np.array(scores)
-    # writer.add_scalar('eval_train/relative_to_base_score', scores[:, 0].mean(), global_i)
-    # writer.add_scalar('eval_train/more_than_handcoded', scores[:, 1].mean(), global_i)
-    # # writer.add_scalar('eval_train/more_than_beam', scores[:,2].mean(), global_i)
-    #
-    # writer.add_scalar('eval_test/relative_to_base_score', test_scores[:, 0].mean(), global_i)
-    # writer.add_scalar('eval_test/more_than_handcoded', test_scores[:, 1].mean(), global_i)
+    for i in np.random.choice(first_ast_nums_correct[:-test_size], size=train_eval_size):  # eval
+      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
+      more_than_handcoded = game_score - base_to_handcoded
+      if beam:
+        more_than_beam = game_score - base_to_beam
+
+      scores.append([game_score, more_than_handcoded, base_to_beam])
+    for i in first_ast_nums_correct[-test_size:]:  # eval
+      game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, eval=True)
+      more_than_handcoded = game_score - base_to_handcoded
+      if beam:
+        more_than_beam = game_score - base_to_beam
+
+      test_scores.append([game_score, more_than_handcoded, base_to_beam])
+    scores = np.array(scores)
+    test_scores = np.array(test_scores)
+    writer.add_scalar('eval_train/relative_to_base_score', scores[:, 0].mean(), global_i)
+    writer.add_scalar('eval_train/more_than_handcoded', scores[:, 1].mean(), global_i)
+    # writer.add_scalar('eval_train/more_than_beam', scores[:,2].mean(), global_i)
+
+    writer.add_scalar('eval_test/relative_to_base_score', test_scores[:, 0].mean(), global_i)
+    writer.add_scalar('eval_test/more_than_handcoded', test_scores[:, 1].mean(), global_i)
     # writer.add_scalar('eval_test/more_than_beam', scores[:,2].mean(), global_i)
 
     # print('eval relative_to_base_score', scores[:,0].round(2))

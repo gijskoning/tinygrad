@@ -1,4 +1,6 @@
 from typing import Dict, List, cast, DefaultDict, Optional
+
+from extra.optimization.helpers import lin_to_feats
 from tinygrad.lazy import vars_from_ast
 from tinygrad.ops import Device, Compiled, MemBuffer
 from tinygrad.helpers import prod, getenv, flatten,ImageDType, DEBUG
@@ -73,6 +75,10 @@ def get_linearizer_actions(lin:Linearizer, include_0=True) -> Dict[int, Lineariz
     lin2 = lin.copy()
     try:
       lin2.apply_opt(a)
+      try:
+        lin_to_feats(lin2)
+      except IndexError as e:
+        pass
       up, lcl = 1, 1
       for s,c in zip(lin2.full_shape, lin2.colors()):
         if c in {"magenta", "yellow"}: up *= s
