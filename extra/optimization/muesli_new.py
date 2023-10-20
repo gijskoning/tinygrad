@@ -376,7 +376,7 @@ class Agent(nn.Module):
     self.representation_network = Representation(state_dim, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)  # todo change to lstm
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
-    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
+    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-3, weight_decay=1e-4)
     self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=episode_nums, end_learning_rate=0.0000)
     self.to(device)
 
@@ -433,23 +433,13 @@ class Agent(nn.Module):
       # should add:
       # basetiming to state
       with torch.no_grad():
-        # st = time.perf_counter()
         hs = target.representation_network(torch.from_numpy(current_state_state).to(device))
-        # print('time for representation', time.perf_counter() - st)
         P, v = target.prediction_network(hs)
-        # P, v = target.prediction_network(torch.from_numpy(state_feature).to(device))
       probs = P.detach().cpu().numpy()
-      # probs = np.ones((self.action_space)) / self.action_space
-      results = []
-      greedy_factor = 0.5
-      new_action_space = int(action_space * greedy_factor)
-      action_mask2 = np.arange(action_space).reshape(1, -1)  # todo now all actions are legal
       legal_actions = [list(get_linearizer_actions(self.env.lin).keys())]  # todo get_linearizer_actions is slow might improve
       action_mask = np.zeros((1, action_space))
       action_mask[0, legal_actions[0]] = 1
-      # print('action_mask', action_mask, 'action_mask2', action_mask2)
       parallel_num = 1
-      # legal_actions = [[i for i, x in enumerate(action_mask[j]) if x == 1] for j in range(parallel_num)]
 
       roots = EfficientZeroMCTSPtree.roots(parallel_num, legal_actions)
       noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[j])
@@ -468,23 +458,14 @@ class Agent(nn.Module):
       action = -1
       for i, env_id in enumerate(ready_env_id):  # currently only 1 thing
         distributions, value = roots_visit_count_distributions[i], roots_values[i]
-        if eps_greedy_exploration_in_collect:
-          # eps-greedy collect
-          action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
-            distributions, temperature=mcts_temperature, deterministic=True
-          )
-          action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
-          if np.random.rand() < self.collect_epsilon:
-            action = np.random.choice(legal_actions[i])
-        else:
-          # normal collect
-          # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
-          # the index within the legal action set, rather than the index in the entire action set.
-          action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
-            distributions, temperature=mcts_temperature, deterministic=eval
-          )
-          # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the entire action set.
-          action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
+        # normal collect
+        # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
+        # the index within the legal action set, rather than the index in the entire action set.
+        action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
+          distributions, temperature=mcts_temperature, deterministic=eval
+        )
+        # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the entire action set.
+        action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
       # for j in range(1):
       #   # for j in range(1):
       #   action, probs = self.env.get_valid_action(probs, select_best=eval)
@@ -541,7 +522,7 @@ class Agent(nn.Module):
 
   from line_profiler_pycharm import profile
   @profile
-  def update_weights_mu(self, target: Target):
+  def update_weights_mu(self, target: Target, episode_num):
     """Optimize network weights.
 
     Iteration: 20
@@ -749,6 +730,9 @@ class Agent(nn.Module):
       self.optimizer.zero_grad()
       L_total.mean().backward()
       nn.utils.clip_grad_value_(self.parameters(), clip_value=1.0)
+      if episode_num <= 8:  # first few need smaller lr. Otherwise Nan can occur
+        for param_group in self.optimizer.param_groups:
+          param_group['lr'] = 3e-4
       self.optimizer.step()
 
       ## target network(prior parameters) moving average update
@@ -824,7 +808,7 @@ assert observation_space[0] == len(env.feature())
 action_space = env.action_length()
 action_space_arange = np.arange(action_space)
 
-episode_nums = 2000
+episode_nums = 1000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
 # exp_str = 'test_no_transformer_'+timing_str # 1,
@@ -900,10 +884,12 @@ for i in range(episode_nums):
   #   break
   if i % episodes_per_train_update == 0 and i >= start_training_epoch:
     print("Training update")
-    agent.update_weights_mu(target)
+    agent.update_weights_mu(target, i)
     print("Done update")
 
   best_score_related_to_handcoded = (best_ast_num_scores - handcoded_best_ast_num_scores)[best_ast_num_scores != 0.]
+  if len(best_score_related_to_handcoded) == 0:
+    best_score_related_to_handcoded = np.zeros(1)
   writer.add_scalar('best_found_score_related_to_handcoded', best_score_related_to_handcoded.mean(), global_i)
   if i % episodes_per_eval == 0 and i >= start_training_epoch:
     print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
