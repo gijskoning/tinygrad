@@ -272,47 +272,62 @@ class Dynamics(nn.Module):
   def __init__(self, input_dim, output_dim, width, action_space):
     super().__init__()
     activation = nn.ReLU(inplace=True)
+    self.activation = activation
     state_action_dim = input_dim + action_space
+
     self.first_layer = nn.Sequential(
       Linear(state_action_dim, input_dim, bias=False), BatchNorm1d(input_dim))
 
-    self.resblocks =  nn.ModuleList([nn.Sequential(
+    self.resblocks = nn.ModuleList([nn.Sequential(
       Linear(input_dim, width, bias=True), BatchNorm1d(width), activation,
       Linear(width, input_dim, bias=True), BatchNorm1d(input_dim),
     ) for _ in range(2)])
     self.hs_head = nn.Sequential(Linear(input_dim, output_dim), BatchNorm1d(output_dim), activation)
-    self.reward_head = nn.Sequential(
-      nn.Linear(input_dim, width), BatchNorm1d(width), activation,
-      nn.Linear(width, width), BatchNorm1d(width), activation,
-      nn.Linear(width, support_size * 2 + 1)
-    )
+
     self.one_hot_act = torch.cat((F.one_hot(torch.arange(0, action_space) % action_space, num_classes=action_space),
                                   torch.zeros(action_space).unsqueeze(0)),
                                  dim=0).to(device)
     self.flatten_output_size_for_reward_head = 64
+    self.to_lstm_layer = nn.Linear(input_dim, self.flatten_output_size_for_reward_head, bias=False)
     self.lstm_hidden_size = 512
+    self.norm_value_prefix = nn.BatchNorm1d(self.lstm_hidden_size)
     self.lstm = nn.LSTM(input_size=self.flatten_output_size_for_reward_head, hidden_size=self.lstm_hidden_size)
-  #
-  def forward(self, state_encoding, action):
+
+    self.fc_reward_head = nn.Sequential(
+      nn.Linear(self.lstm_hidden_size, width), BatchNorm1d(width), activation,
+      *(nn.Linear(width, width), BatchNorm1d(width), activation),
+      nn.Linear(width, support_size * 2 + 1)
+    )
+
+  def forward(self, state_encoding, action, reward_hidden_state):
     action = self.one_hot_act[action.squeeze(1)]
     state_action_encoding = torch.cat((state_encoding, action.to(device)), dim=-1)
     x = self.first_layer(state_action_encoding)
-    x = (x+state_encoding).relu_()
+    x = (x + state_encoding).relu_()
     for resblock in self.resblocks:
       x = (resblock(x) + x).relu_()
     hs = self.hs_head(x)
 
     # # use lstm to predict value_prefix and reward_hidden_state
-    # value_prefix, next_reward_hidden_state = self.lstm(x, reward_hidden_state)
-    #
-    # value_prefix = value_prefix.squeeze(0)
-    # value_prefix = self.norm_value_prefix(value_prefix)
-    # value_prefix = self.activation(value_prefix)
-    # value_prefix = self.fc_reward_head(value_prefix)
+    value_prefix, next_reward_hidden_state = self.lstm(self.to_lstm_layer(x).unsqueeze(0), reward_hidden_state)
 
-    reward = self.reward_head(x)
+    value_prefix = value_prefix.squeeze(0)
+    value_prefix = self.norm_value_prefix(value_prefix)
+    value_prefix = self.activation(value_prefix)
+    value_prefix = self.fc_reward_head(value_prefix)
+
+    # reward = self.reward_head(x)
     # hs = 2 * (hs - hs.min(-1, keepdim=True)[0]) / (hs.max(-1, keepdim=True)[0] - hs.min(-1, keepdim=True)[0]) - 1
-    return hs, reward
+    return hs, value_prefix, next_reward_hidden_state  # todo fix that this is value_prefix
+
+  def init_reward_hidden_state(self, batch_size, _device=None):
+    if _device is None:
+      _device = device
+    return (
+      torch.zeros(1, batch_size,
+                  self.lstm_hidden_size).to(_device), torch.zeros(1, batch_size,
+                                                                      self.lstm_hidden_size).to(_device)
+    )
 
 
 class Prediction(nn.Module):
@@ -462,8 +477,7 @@ class Agent(nn.Module):
       legal_actions = [list(get_linearizer_actions(self.env.lin).keys())]  # todo get_linearizer_actions is slow might improve
       action_mask = np.zeros((1, action_space))
       action_mask[0, legal_actions[0]] = 1
-      parallel_num = 1
-      greedy = not evaluation and (episode_num < greedy_episodes)  # 0.98**100 = 0.13
+      greedy = False # not evaluation and (episode_num < greedy_episodes)  # 0.98**100 = 0.13
       if greedy:  # todo could cache full greedy episode
         results = []
         for action in legal_actions[0]:
@@ -476,22 +490,20 @@ class Agent(nn.Module):
       else:
         mcts = True
         if mcts:
-          roots = EfficientZeroMCTSPtree.roots(parallel_num, legal_actions)
-          noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[j])
-                                        ).astype(np.float32).tolist() for j in range(parallel_num)]
+          roots = EfficientZeroMCTSPtree.roots(1, legal_actions)
+          noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[0])
+                                        ).astype(np.float32).tolist()]
 
           roots.prepare(mcts_tree._cfg.root_noise_weight, noises, probs.reshape(1, -1))
           # we have no reward_hidden_state_roots. we just have a single latent
           latent_state = hs  # (the hidden state in latent space)
           # latent_state = None # this requires an lstm that we dont have
-          mcts_tree.search(roots, self, latent_state.detach().cpu().numpy().reshape(1, -1))
+          reward_hidden_state = self.dynamics_network.init_reward_hidden_state(1, _device='cpu')
+          mcts_tree.search(roots, self, latent_state.detach().cpu().numpy().reshape(1, -1), reward_hidden_state)
           roots_visit_count_distributions = roots.get_distributions()
           roots_values = roots.get_values()  # shape: {list: batch_size}
-          ready_env_id = None
-          if ready_env_id is None:
-            ready_env_id = np.arange(parallel_num)
           action = -1
-          for i, env_id in enumerate(ready_env_id):  # currently only 1 thing
+          for i, env_id in enumerate([0]):
             distributions, value = roots_visit_count_distributions[i], roots_values[i]
             # normal collect
             # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
@@ -615,8 +627,9 @@ class Agent(nn.Module):
       for i in range(-1, unroll_steps):
         if i == -1:
           hs = self.representation_network(state_0)
+          reward_hidden_state = self.dynamics_network.init_reward_hidden_state(minibatch_size)
         else:
-          hs, r_logits = self.dynamics_network(hs, action_traj[:, i])
+          hs, r_logits, reward_hidden_state = self.dynamics_network(hs, action_traj[:, i], reward_hidden_state)
           r_logits_s.append(r_logits)
 
         P, v_logits = self.prediction_network(hs)
@@ -654,7 +667,8 @@ class Agent(nn.Module):
           action1_stack_all_samples = torch.from_numpy(action1_stack_all_samples).T
           flatten_action = action1_stack_all_samples.reshape(-1, 1)
           hs_expand_and_flatten = hs.expand((len(action1_stack_all_samples), *hs.shape)).reshape(len(flatten_action), hs.shape[-1])
-          hs, r1 = target.dynamics_network(hs_expand_and_flatten, flatten_action)
+          reward_hidden_state = target.dynamics_network.init_reward_hidden_state(len(flatten_action))
+          hs, r1, _ = target.dynamics_network(hs_expand_and_flatten, flatten_action, reward_hidden_state)
           _, v1 = target.prediction_network(hs)
           r1_arr = to_scalar(r1).reshape(-1, _lookahead_samples)
           v1_arr = to_scalar(v1).reshape(-1, _lookahead_samples)
@@ -820,8 +834,8 @@ test_size = 1
 assert train_eval_size + test_size <= len(first_ast_nums_correct)
 train_eval_set = first_ast_nums_correct[:train_eval_size]
 test_eval_set = first_ast_nums_correct[-test_size:]
-train_updates = 4
-episodes_per_train_update = 4  # was 4
+train_updates = 1
+episodes_per_train_update = 1  # was 4
 episodes_per_eval = 256
 start_training_epoch = episodes_per_train_update  # todo set higher
 assert start_training_epoch >= episodes_per_train_update

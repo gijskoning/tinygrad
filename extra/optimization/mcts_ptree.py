@@ -80,6 +80,7 @@ class EfficientZeroMCTSPtree(object):
     pb_c_init=1.25,
     # (float) The maximum change in value allowed during the backup step of the search tree update.
     value_delta_max=0.01,
+    lstm_horizon_len=5,
   )
 
   @classmethod
@@ -143,8 +144,8 @@ class EfficientZeroMCTSPtree(object):
       latent_state_batch_in_search_path = [latent_state_roots]
 
       # the data storage of value prefix hidden states in LSTM
-      # reward_hidden_state_c_batch = [reward_hidden_state_roots[0]]
-      # reward_hidden_state_h_batch = [reward_hidden_state_roots[1]]
+      reward_hidden_state_c_batch = [reward_hidden_state_roots[0]]
+      reward_hidden_state_h_batch = [reward_hidden_state_roots[1]]
 
       # minimax value storage
       min_max_stats_lst = MinMaxStatsList(batch_size)
@@ -153,8 +154,8 @@ class EfficientZeroMCTSPtree(object):
         # In each simulation, we expanded a new node, so in one search, we have ``num_simulations`` num of nodes at most.
 
         latent_states = []
-        # hidden_states_c_reward = []
-        # hidden_states_h_reward = []
+        hidden_states_c_reward = []
+        hidden_states_h_reward = []
 
         # prepare a result wrapper to transport results between python and c++ parts
         results = tree.SearchResults(num=batch_size)
@@ -176,15 +177,14 @@ class EfficientZeroMCTSPtree(object):
         # obtain the latent state for leaf node
         for ix, iy in zip(latent_state_index_in_search_path, latent_state_index_in_batch):
           latent_states.append(latent_state_batch_in_search_path[ix][iy])
-          # hidden_states_c_reward.append(reward_hidden_state_c_batch[ix][0][iy])
-          # hidden_states_h_reward.append(reward_hidden_state_h_batch[ix][0][iy])
+          hidden_states_c_reward.append(reward_hidden_state_c_batch[ix][0][iy])
+          hidden_states_h_reward.append(reward_hidden_state_h_batch[ix][0][iy])
 
         latent_states = torch.from_numpy(np.asarray(latent_states)).to(self._cfg.device).float()
-        # hidden_states_c_reward = torch.from_numpy(np.asarray(hidden_states_c_reward)).to(self._cfg.device
-        #                                                                                  ).unsqueeze(0)
-        # hidden_states_h_reward = torch.from_numpy(np.asarray(hidden_states_h_reward)).to(self._cfg.device
-        #                                                                                  ).unsqueeze(0)
-        # .long() is only for discrete action
+        hidden_states_c_reward = torch.from_numpy(np.asarray(hidden_states_c_reward)).to(self._cfg.device
+                                                                                         ).unsqueeze(0)
+        hidden_states_h_reward = torch.from_numpy(np.asarray(hidden_states_h_reward)).to(self._cfg.device
+                                                                                         ).unsqueeze(0)
         last_actions = np.asarray(last_actions)
         if len(last_actions.shape) == 1:
           last_actions = last_actions.reshape(-1, 1)
@@ -196,13 +196,8 @@ class EfficientZeroMCTSPtree(object):
         MCTS stage 3: Backup
             At the end of the simulation, the statistics along the trajectory are updated.
         """
-        latent_state, r_logits = model.dynamics_network(latent_states, last_actions)
+        latent_state, r_logits, reward_hidden_state = model.dynamics_network(latent_states, last_actions, (hidden_states_c_reward, hidden_states_h_reward))
         policy_logits, v_logits = model.prediction_network(latent_state)
-        # hs, r_logits= self.dynamics_network(hs, action_traj[:, i - 1])
-        # network_output = model.recurrent_inference(
-        #     latent_states, (hidden_states_c_reward, hidden_states_h_reward), last_actions
-        # )
-
         [
             latent_state, policy_logits, value#,
             #network_output.value_prefix
@@ -214,29 +209,22 @@ class EfficientZeroMCTSPtree(object):
                 # self.inverse_scalar_transform_handle(network_output.value_prefix),
             ]
         )
-        # network_output.reward_hidden_state = (
-        #     network_output.reward_hidden_state[0].detach().cpu().numpy(),
-        #     network_output.reward_hidden_state[1].detach().cpu().numpy()
-        # )
-
         latent_state_batch_in_search_path.append(latent_state)
-        # reward_latent_state_batch = network_output.reward_hidden_state
-        # tolist() is to be compatible with cpp datatype.
-        # value_batch = network_output.value.reshape(-1).tolist()
+        reward_latent_state_batch = (reward_hidden_state[0].detach().cpu().numpy(), reward_hidden_state[1].detach().cpu().numpy())
         value_batch = value.reshape(-1).tolist()
         # value_prefix_batch = network_output.value_prefix.reshape(-1).tolist()
         policy_logits_batch = policy_logits.tolist()
 
         # reset the hidden states in LSTM every ``lstm_horizon_len`` steps in one search.
         # which enable the model only need to predict the value prefix in a range (e.g.: [s0,...,s5]).
-        # assert self._cfg.lstm_horizon_len > 0
-        # reset_idx = (np.array(search_lens) % self._cfg.lstm_horizon_len == 0)
-        # reward_latent_state_batch[0][:, reset_idx, :] = 0
-        # reward_latent_state_batch[1][:, reset_idx, :] = 0
-        is_reset_list = [False] * len(search_lens)
-        # is_reset_list = reset_idx.astype(np.int32).tolist()
-        # reward_hidden_state_c_batch.append(reward_latent_state_batch[0])
-        # reward_hidden_state_h_batch.append(reward_latent_state_batch[1])
+        assert self._cfg.lstm_horizon_len > 0
+        reset_idx = (np.array(search_lens) % self._cfg.lstm_horizon_len == 0)
+        reward_latent_state_batch[0][:, reset_idx, :] = 0
+        reward_latent_state_batch[1][:, reset_idx, :] = 0
+        # is_reset_list = [False] * len(search_lens)
+        is_reset_list = reset_idx.astype(np.int32).tolist()
+        reward_hidden_state_c_batch.append(reward_latent_state_batch[0])
+        reward_hidden_state_h_batch.append(reward_latent_state_batch[1])
 
         # In ``batch_backpropagate()``, we first expand the leaf node using ``the policy_logits`` and
         # ``reward`` predicted by the model, then perform backpropagation along the search path to update the
