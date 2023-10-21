@@ -10,7 +10,7 @@ from extra.optimization.minimax import MinMaxStatsList
 from extra.optimization.muesli_funcs import to_scalar
 
 if TYPE_CHECKING:
-  from extra.optimization.muesli_new import Target
+  from extra.optimization.muesli_new import Agent
 
 from scipy.stats import entropy
 
@@ -117,7 +117,7 @@ class EfficientZeroMCTSPtree(object):
   def search(
     self,
     roots: Any,
-    model: 'Target',
+    model: 'Agent',
     latent_state_roots: List[Any],
     reward_hidden_state_roots: List[Any] = None, #todo
     to_play: Union[int, List[Any]] = -1
