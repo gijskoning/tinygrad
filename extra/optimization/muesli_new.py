@@ -7,6 +7,7 @@ from datetime import datetime
 from threading import Thread
 
 from easydict import EasyDict
+from torch import autograd
 from torch.nn import BatchNorm1d, Linear
 from torch.utils.tensorboard import SummaryWriter
 
@@ -69,12 +70,10 @@ class State:
     state._feature = None
 
     state.steps += 1
-    if act == 0:
+    if act == 0 or state.steps == MAX_DIMS - 1:
       state.trial += 1
       state.terminal = state.trial == max_trials
-      if not state.terminal:
-        print('resetting trial to', state.trial + 1, 'reward was ', state._reward)
-    state.terminal = state.terminal or state.steps == MAX_DIMS - 1
+      # if not state.terminal:
     if state.terminal:
       state.failed, r = False, 0.
       return state, state.feature(), r, state.terminal, None
@@ -125,16 +124,16 @@ class State:
 
         t1 = Thread(target=_thread, args=(result,), daemon=True)
         t1.start()
-        t1.join(timeout=5)  # 5 seconds
+        t1.join(timeout=3)  # 3 seconds
         if t1.is_alive():
           print('thread timeout')
           failed = True
-          tm = 5.
+          tm = 1.
         else:
           tm = result[0]
         assert not math.isinf(tm)
         # we clip the rewards to ensure stability. Note:
-        self._reward = max((self.last_tm - tm) / self.base_tm, -5.)
+        self._reward = max((self.last_tm - tm) / self.base_tm, -1.)
 
         self.last_tm = tm
     except AssertionError as e:
@@ -237,21 +236,44 @@ class Representation(nn.Module):
 
   def __init__(self, input_dim, output_dim, width):
     super().__init__()
-    self.skip = torch.nn.Linear(input_dim, output_dim)
+    self.skip = torch.nn.Linear(input_dim, width)
     activation = nn.ReLU(inplace=True)
     self.layers = nn.Sequential(
-      Linear(input_dim, width), BatchNorm1d(width), activation,
-      Linear(width, width), BatchNorm1d(width), activation,
-      Linear(width, width), BatchNorm1d(width), activation,
-      Linear(width, output_dim))
-    self.final = nn.Sequential(BatchNorm1d(output_dim), activation)
+      Linear(input_dim, width, bias=False), BatchNorm1d(width), activation,
+      Linear(width, width, bias=False), BatchNorm1d(width), activation,
+      Linear(width, width, bias=False))
+    self.norm_combine_skip_layer = nn.Sequential(BatchNorm1d(width), activation)
+    self.lstm_input_size = 256
+    self.lstm_hidden_size = 256
+    self.combine_with_lstm = nn.Sequential(nn.Linear(width + self.lstm_hidden_size, output_dim, bias=False), BatchNorm1d(output_dim), activation)
+    self.to_lstm_layer = nn.Linear(width, self.lstm_input_size, bias=False)
+    self.lstm = nn.LSTM(input_size=self.lstm_input_size, hidden_size=self.lstm_hidden_size)
+    for name, param in self.lstm.named_parameters():
+      if "bias" in name:
+        nn.init.constant_(param, 0)
+      elif "weight" in name:
+        nn.init.orthogonal_(param, np.sqrt(2))
 
-  def forward(self, x):
+  def forward(self, x, lstm_hidden_state):
     s = self.skip(x)
     x = self.layers(x)
-    x = self.final(x + s)
-    x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
-    return x
+    x = self.norm_combine_skip_layer(x + s)
+    # x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
+    input_lstm = self.to_lstm_layer(x).unsqueeze(0)
+    lstm_output, lstm_hidden_state = self.lstm(input_lstm, lstm_hidden_state)
+
+    x = self.combine_with_lstm(torch.cat((x, lstm_output.squeeze(0)), dim=-1))
+
+    return x, lstm_hidden_state
+
+  def init_hidden_state(self, batch_size, _device=None):
+    if _device is None:
+      _device = device
+    return (
+      torch.zeros(1, batch_size,
+                  self.lstm_hidden_size).to(_device), torch.zeros(1, batch_size,
+                                                                  self.lstm_hidden_size).to(_device)
+    )
 
 
 class Dynamics(nn.Module):
@@ -326,7 +348,7 @@ class Dynamics(nn.Module):
     return (
       torch.zeros(1, batch_size,
                   self.lstm_hidden_size).to(_device), torch.zeros(1, batch_size,
-                                                                      self.lstm_hidden_size).to(_device)
+                                                                  self.lstm_hidden_size).to(_device)
     )
 
 
@@ -407,6 +429,21 @@ class Target(nn.Module):
     self.to(device)
 
 
+def get_burn_in_hidden_states(model, state_traj, lstm_hs_traj, state_traj_i):
+  burn_in_lstm_hs_traj = []
+  lstm_hs = lstm_hs_traj
+  for i in range(lstm_burn_in_length):
+    # if i > 0:
+    #   lstm_hs[0][lstm_prepend_length == i] *= 0.  # prepends are zeros. So we need the hidden state to remain zero.
+    #   lstm_hs[1][lstm_prepend_length == i] *= 0.
+    hs, lstm_hs = model.representation_network(state_traj[:, i], lstm_hs)
+    burn_in_lstm_hs_traj.append(lstm_hs)
+  less_steps = np.maximum(0, lstm_burn_in_length - state_traj_i - 1)  # happens when i is around the episode starting point
+  burn_in_lstm_hx_traj = torch.stack([burn_in_lstm_hs_traj[-_less_steps - 1][0].squeeze()[i] for i, _less_steps in enumerate(less_steps)])
+  burn_in_lstm_cx_traj = torch.stack([burn_in_lstm_hs_traj[-_less_steps - 1][0].squeeze()[i] for i, _less_steps in enumerate(less_steps)])
+  return burn_in_lstm_hx_traj.unsqueeze(0), burn_in_lstm_cx_traj.unsqueeze(0)
+
+
 class Agent(nn.Module):
   """Agent Class"""
 
@@ -415,7 +452,7 @@ class Agent(nn.Module):
     self.representation_network = Representation(state_dim, state_dim, width)
     self.dynamics_network = Dynamics(state_dim, state_dim, width, action_dim)  # todo change to lstm
     self.prediction_network = Prediction(state_dim, action_dim, width)
-    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
+    self.optimizer = torch.optim.AdamW(self.parameters(), lr=5e-4, weight_decay=1e-4)
     self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=episode_nums, end_learning_rate=0.0000)
     self.to(device)
 
@@ -423,6 +460,8 @@ class Agent(nn.Module):
     self.action_replay = []
     self.P_replay = []
     self.r_replay = []
+    self.lstm_hx_replay = []
+    self.lstm_cx_replay = []
 
     self.action_space = action_dim
     self.env = None
@@ -443,7 +482,7 @@ class Agent(nn.Module):
     """
     self.eval()
     mcts_temperature = max(0.1 * 0.99 ** episode_num, 0.01)
-    cfg = dict(num_simulations=30 if not evaluation else 30,
+    cfg = dict(num_simulations=15 if not evaluation else 30,
                discount_factor=gamma,
                device=device)
     mcts_tree = EfficientZeroMCTSPtree(EasyDict(cfg))
@@ -455,12 +494,16 @@ class Agent(nn.Module):
     base_tm = self.env.set_base_tm()
     state_feature = self.env.feature()
     # state_dim = len(state_feature)
-    state_traj, action_traj, P_traj, r_traj = [], [], [], []
-    hs = self.representation_network(torch.from_numpy(state_feature).unsqueeze(0).to(device))
+    state_traj, action_traj, P_traj, r_traj, lstm_hx_traj, lstm_cx_traj = [], [], [], [], [], []
+    lstm_hidden_state = self.representation_network.init_hidden_state(batch_size=1)
+    hs, _ = self.representation_network(torch.from_numpy(state_feature).unsqueeze(0).to(device), lstm_hidden_state)
     _, base_v_logits = self.prediction_network(hs)
     base_v = to_scalar(base_v_logits).squeeze()
-
+    print('start episode')
     for i in range(max_episode_length):
+      lstm_hx_traj.append(lstm_hidden_state[0].cpu().numpy().squeeze())
+      lstm_cx_traj.append(lstm_hidden_state[1].cpu().numpy().squeeze())
+
       current_state_state = state_feature
       # it combines all observations into one transformer model I think one could see it as the representation network
       # to add to observation
@@ -471,13 +514,13 @@ class Agent(nn.Module):
       # should add:
       # basetiming to state
       with torch.no_grad():
-        hs = self.representation_network(torch.from_numpy(current_state_state).unsqueeze(0).to(device))
+        hs, lstm_hidden_state = self.representation_network(torch.from_numpy(current_state_state).unsqueeze(0).to(device), lstm_hidden_state)
         P, v = self.prediction_network(hs)
       probs = P.detach().cpu().numpy().squeeze()
       legal_actions = [list(get_linearizer_actions(self.env.lin).keys())]  # todo get_linearizer_actions is slow might improve
       action_mask = np.zeros((1, action_space))
       action_mask[0, legal_actions[0]] = 1
-      greedy = False # not evaluation and (episode_num < greedy_episodes)  # 0.98**100 = 0.13
+      greedy = not evaluation and (episode_num < greedy_episodes and np.random.rand() < 0.5)  # 0.98**100 = 0.13
       if greedy:  # todo could cache full greedy episode
         results = []
         for action in legal_actions[0]:
@@ -524,34 +567,40 @@ class Agent(nn.Module):
       # policy_action = np.argmax(probs * action_mask[0])
 
       print('action', action)  # , 'policy_action', policy_action, 'i', i)
-      if i == 0:
-        for _ in range(num_state_stack):
-          state_traj.append(current_state_state)
-      else:
-        state_traj.append(current_state_state)
+      state_traj.append(current_state_state)
       action_traj.append(action)
       P_traj.append(probs)
       # print('r', r, 'basetm', base_tm, 'lasttm', self.env.last_tm)
       r_traj.append(r)
 
       ## For fix lunarlander-v2 env does not return reward -100 when 'TimeLimit.truncated'
+      last_frame = i
       if done:
-        last_frame = i
         break
 
     # for update inference over trajectory length
     for _ in range(unroll_steps):
       state_traj.append(np.zeros_like(state_feature))
     print('total r', sum(r_traj), 'base_v', base_v.item())
-    for _ in range(unroll_steps + 1):
-      r_traj.append(0.0)
-      action_traj.append(-1)
+
     if not evaluation:
+      # for _ in range(max_episode_length+unroll_steps - len(state_traj)):
+      #   state_traj.append(np.zeros_like(state_feature))
+      #   r_traj.append(0.0)
+      #   action_traj.append(-1)
+      #   P_traj.append(np.zeros_like(probs))
+
+      for _ in range(unroll_steps + 1):
+        r_traj.append(0.0)
+        action_traj.append(-1)
       # traj append to replay
       self.state_replay.append(state_traj)
       self.action_replay.append(action_traj)
       self.P_replay.append(P_traj)
       self.r_replay.append(r_traj)
+      self.lstm_hx_replay.append(lstm_hx_traj)
+      self.lstm_cx_replay.append(lstm_cx_traj)
+      # self.episode_length_replay.append(last_frame + 1)
     self.env.reward()  # set last_tm
     game_score = (base_tm - self.env.last_tm) / base_tm
     base_to_handcoded = (base_tm - self.env.handcoded_tm) / base_tm
@@ -560,6 +609,7 @@ class Agent(nn.Module):
 
   # from line_profiler_pycharm import profile
   # @profile
+
   def update_weights_mu(self, target: Target, episode_num):
     """Optimize network weights.
 
@@ -575,22 +625,16 @@ class Agent(nn.Module):
     """
     self.train()
     target.eval()
+    use_lstm = True
 
     for _ in range(train_updates):
-      state_traj_i = []
-      state_traj = []
-      action_traj = []
-      P_traj = []
-      r_traj = []
+      state_traj_i, state_traj, action_traj, P_traj, r_traj, lstm_hx_traj, lstm_cx_traj = [], [], [], [], [], [], []
       G_arr_mb = []
-      for epi_sel in range(num_replays):  # this is q
-        if (epi_sel > num_replays / 4):  ## 1/4 of replay buffer is used for on-policy data
-          ep_i = np.random.randint(0, max(1, len(self.state_replay) - 1))
-        # elif (epi_sel > num_replays / 2):  ## 1/4 of replay buffer is used for greedy data
-        #   ep_i = np.random.randint(0, greedy_episodes)
-        else:
-          ep_i = -np.random.randint(max(1, episodes_per_train_update))  # pick one of the newest episodes
-
+      selected_episodes = []
+      selected_episodes += np.random.randint(max(len(self.state_replay) - episodes_per_train_update, 0), len(self.state_replay), size=num_replays // 4).tolist()
+      selected_episodes += np.random.randint(max(len(self.state_replay) - 128, 0), len(self.state_replay),
+                                             size=num_replays - num_replays // 4).tolist()
+      for ep_i in selected_episodes:  # this is q
         ## multi step return G (orignally retrace used)
         G = 0
         G_arr = []
@@ -598,15 +642,35 @@ class Agent(nn.Module):
           G = gamma * G + r
           G_arr.append(G)
         G_arr.reverse()
-        for i in np.random.randint(len(self.state_replay[ep_i]) - unroll_steps - (num_state_stack - 1), size=seq_in_replay):
-          state_traj_i.append(i)
-          state_traj.append(self.state_replay[ep_i][i:i + unroll_steps + num_state_stack])
-          action_traj.append(self.action_replay[ep_i][i:i + unroll_steps + num_state_stack])
-          r_traj.append(self.r_replay[ep_i][i:i + unroll_steps])
-          G_arr_mb.append(G_arr[i:i + unroll_steps + 1])
-          P_traj.append(self.P_replay[ep_i][i])
-
-      # state_traj_i = np.array(state_traj_i)
+        # if False:
+        #   # we use the full episode
+        #   len_episode = len(self.state_replay[ep_i])
+        #   state_traj.append(self.state_replay[ep_i])
+        #   action_traj.append(self.action_replay[ep_i])
+        #   r_traj.append(self.r_replay[ep_i])
+        #   G_arr_mb.append(G_arr)
+        #   P_traj.append(self.P_replay[ep_i])
+        # else:
+        i = np.random.randint(len(self.state_replay[ep_i]) - unroll_steps, size=seq_in_replay)[0]
+        state_traj_i.append(i)
+        state_traj.append(self.state_replay[ep_i][i:i + unroll_steps + 1] + [np.zeros_like(self.state_replay[0][0]) for _ in range(lstm_burn_in_length)])
+        action_traj.append(self.action_replay[ep_i][i:i + unroll_steps + 1])
+        r_traj.append(self.r_replay[ep_i][i:i + unroll_steps])
+        G_arr_mb.append(G_arr[i:i + unroll_steps + 1])
+        P_traj.append(self.P_replay[ep_i][i])
+        lstm_shape = self.lstm_hx_replay[0][0].shape
+        if use_lstm:
+          # start = max(0, i - lstm_burn_in_length)
+          # end = min(len(self.lstm_hx_replay[ep_i]), i + lstm_burn_in_length)
+          # lstm_hx_traj.extend([np.zeros(lstm_shape) for _ in range(prepend_size)] + [self.lstm_hx_replay[ep_i][i]])  # + unroll_steps + 1])
+          # lstm_cx_traj.extend([np.zeros(lstm_shape) for _ in range(prepend_size)] + [self.lstm_cx_replay[ep_i][i]])  # + unroll_steps + 1])
+          if i < lstm_burn_in_length:
+            lstm_hx_traj.append(np.zeros(lstm_shape))
+            lstm_cx_traj.append(np.zeros(lstm_shape))
+          else:
+            lstm_hx_traj.append(self.lstm_hx_replay[ep_i][max(0, i - lstm_burn_in_length)])
+            lstm_cx_traj.append(self.lstm_cx_replay[ep_i][max(0, i - lstm_burn_in_length)])
+      state_traj_i = np.array(state_traj_i)
       state_traj = torch.from_numpy(np.array(state_traj)).to(device)
       action_traj = torch.from_numpy(np.array(action_traj)).unsqueeze(2).to(device)
       P_traj = torch.from_numpy(np.array(P_traj)).to(device)
@@ -615,18 +679,27 @@ class Agent(nn.Module):
       mask_batch = torch.zeros_like(action_traj)
       mask_batch[action_traj != -1] = 1  # all states with action not -1 are valid states
 
+      lstm_hs_traj_0 = None
+      lstm_hs_traj_0_t = None
+      if use_lstm:
+        # get burn in hidden states
+        # r2d2: https://openreview.net/pdf?id=r1lyTjAqYX
+        lstm_hs_no_burn_in = (torch.from_numpy(np.stack(lstm_hx_traj, dtype=np.float32)).unsqueeze(0).to(device),
+                              torch.from_numpy(np.stack(lstm_cx_traj, dtype=np.float32)).unsqueeze(0).to(device))
+        lstm_hs_traj_0 = get_burn_in_hidden_states(self, state_traj, lstm_hs_no_burn_in, state_traj_i)
+        lstm_hs_traj_0_t = get_burn_in_hidden_states(target, state_traj, lstm_hs_no_burn_in, state_traj_i)
       inferenced_P_arr = []
 
       ## stacking
       state_0 = state_traj[:, 0]
-
       ## agent network inference (5 step unroll)
       latent_states = []
       v_logits_s = []
       r_logits_s = []
-      for i in range(-1, unroll_steps):
+      for i in range(-1, unroll_steps):  # unroll dynamics network
         if i == -1:
-          hs = self.representation_network(state_0)
+          hs, lstm_hidden_state = self.representation_network(state_0, lstm_hs_traj_0)
+
           reward_hidden_state = self.dynamics_network.init_reward_hidden_state(minibatch_size)
         else:
           hs, r_logits, reward_hidden_state = self.dynamics_network(hs, action_traj[:, i], reward_hidden_state)
@@ -640,7 +713,7 @@ class Agent(nn.Module):
 
       # target network inference
       with torch.no_grad():
-        t_first_hs = target.representation_network(state_0)
+        t_first_hs, lstm_hidden_state = target.representation_network(state_0, lstm_hs_traj_0_t)
         t_first_P, t_first_v_logits = target.prediction_network(t_first_hs)
 
         ## normalized advantage
@@ -652,7 +725,7 @@ class Agent(nn.Module):
 
       ## L_pg_cmpo first term (eq.10)
       importance_weight = torch.clip(first_P.gather(1, action_traj[:, 0])
-                                     / (P_traj.gather(1, action_traj[:, 0])),
+                                     / (P_traj.gather(1, action_traj[:, 0]) + 1e-10),
                                      0, 1
                                      )
       first_term = -1 * importance_weight * (G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) / under
@@ -691,13 +764,14 @@ class Agent(nn.Module):
       for k in range(lookahead_samples):
         second_term += exp_clip_adv_arr[:, k] / z_cmpo_arr[:, k] * torch.log(first_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))).squeeze()
       second_term *= -1 * regularizer_multiplier / lookahead_samples
-
+      print(second_term.mean(dim=0))
       ## L_pg_cmpo
       L_pg_cmpo = first_term + second_term
 
       ## L_m eq. 13
       L_m = 0
       L_consistency = 0.
+      lstm_hidden_state = lstm_hs_traj_0
       for i in range(unroll_steps):
         state = state_traj[:, i]
 
@@ -705,11 +779,12 @@ class Agent(nn.Module):
         dynamic_proj = self.prediction_network.projection(latent_states[i])  # take the dynamics state. really want to have an lstm state here
         self.prediction_network.prediction_head(dynamic_proj)
         with torch.no_grad():
-          hs = self.representation_network(state)
+          hs, lstm_hidden_state = self.representation_network(state, lstm_hidden_state)
           observation_proj = self.prediction_network.projection(hs)
 
         L_consistency += negative_cosine_similarity(dynamic_proj, observation_proj.detach()) * mask_batch[:, i]
 
+      lstm_hidden_state = lstm_hs_traj_0_t
       limited_unroll_steps = 0
       for i in range(unroll_steps):
         _mask_batch = mask_batch[:, i + 1]  # we need to mask finished episodes
@@ -719,7 +794,7 @@ class Agent(nn.Module):
         limited_unroll_steps = i + 1
         stacked_state = state_traj[:, i + 1]
         with torch.no_grad():
-          t_hs = target.representation_network(stacked_state)
+          t_hs, lstm_hidden_state = target.representation_network(stacked_state, lstm_hidden_state)
           t_P, t_v_logits = target.prediction_network(t_hs)
 
         beta_var = 0.99
@@ -729,7 +804,6 @@ class Agent(nn.Module):
         self.beta_product_m[i] *= beta_var
         var_hat = self.var_m[i] / (1 - self.beta_product_m[i])
         under = torch.sqrt(var_hat + 1e-12)
-
         r1_arr, v1_arr, a1_arr, exp_clip_adv_arr = lookahead(t_P, t_hs, lookahead_samples2, t_v_logits, under)
 
         exp_clip_adv_arr = exp_clip_adv_arr * _mask_batch
@@ -740,11 +814,12 @@ class Agent(nn.Module):
                         * exp_clip_adv_arr[:, k]) for k in range(lookahead_samples2)]
 
         pi_cmpo_all = (torch.stack(pi_cmpo_all).transpose(0, 1).to(device))[_mask_batch.squeeze() == 1]
-        pi_cmpo_all = pi_cmpo_all / torch.sum(pi_cmpo_all, dim=1).unsqueeze(-1)
+        pi_cmpo_all = pi_cmpo_all / (torch.sum(pi_cmpo_all, dim=1).unsqueeze(-1) + 1e-10)
         kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
         # # I think this is right. todo but not completely sure
         P_arr_selected_actions = torch.gather(inferenced_P_arr[i + 1], 1, a1_arr.T.to(device))
-        L_m += kl_loss(torch.log(P_arr_selected_actions)[_mask_batch.squeeze() == 1], pi_cmpo_all)
+        L_m += kl_loss(torch.log(P_arr_selected_actions + 1e-10)[_mask_batch.squeeze() == 1], pi_cmpo_all)
+        assert np.isfinite(L_m.mean().item()), _mask_batch.sum(dim=1)
       if limited_unroll_steps > 0:
         L_m /= limited_unroll_steps
 
@@ -758,8 +833,6 @@ class Agent(nn.Module):
       for i in range(unroll_steps + 1): L_v += (to_scalar(v_logits_s[i]) - G_arr_mb[:, i]) ** 2 * mask_batch[:, i]
       assert np.isfinite(L_v.mean().item())
       print('L_v', L_v.mean().item())
-      # ## consistency_loss
-      print('consistency_loss', L_consistency.mean().item())
 
       # ## L_r
       L_r = 0.
@@ -770,13 +843,11 @@ class Agent(nn.Module):
       ## total loss
       # L_total = L_pg_cmpo + L_v / (unroll_steps + 1) / 4 + L_r / unroll_steps / 1 + L_m
       L_total = L_pg_cmpo + L_v_dist + L_consistency * 2 / unroll_steps + L_r / unroll_steps + L_m
+      assert np.isfinite(L_total.mean().item())
       ## optimize
       self.optimizer.zero_grad()
       L_total.mean().backward()
       nn.utils.clip_grad_value_(self.parameters(), clip_value=1.0)
-      # if episode_num <= 16:  # first few need smaller lr. Otherwise Nan can occur
-      #   for param_group in self.optimizer.param_groups:
-      #     param_group['lr'] = 3e-4
       self.optimizer.step()
 
       ## target network(prior parameters) moving average update
@@ -809,7 +880,7 @@ score_arr_handcoded = []
 ast_strs = load_worlds()
 random.shuffle(ast_strs)
 
-first_ast_nums_correct = list(range(2))
+first_ast_nums_correct = list(range(10))
 # for i in deepcopy(first_ast_nums_correct):
 #   try:
 #     env = State(ast_strs, i)
@@ -821,32 +892,33 @@ first_ast_nums_correct = list(range(2))
 #     del env
 #     del first_ast_nums_correct[i]
 first_ast_nums = len(first_ast_nums_correct)
-num_replays = 16
+num_replays = 128
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
-max_trials = 1
+max_trials = 3
 use_sts = True
 max_episode_length = MAX_DIMS * max_trials
 num_state_stack = 1
-greedy_episodes = first_ast_nums * 2
+greedy_episodes = 30
 train_eval_size = 1
 test_size = 1
 assert train_eval_size + test_size <= len(first_ast_nums_correct)
 train_eval_set = first_ast_nums_correct[:train_eval_size]
 test_eval_set = first_ast_nums_correct[-test_size:]
-train_updates = 1
-episodes_per_train_update = 1  # was 4
+train_updates = 32
+episodes_per_train_update = 4  # was 4
 episodes_per_eval = 256
-start_training_epoch = episodes_per_train_update  # todo set higher
+start_training_epoch = 12  # todo set higher
 assert start_training_epoch >= episodes_per_train_update
 use_transformer = True
 alpha_target = 0.2  # 5% new to target
 
 regularizer_multiplier = 1  # was 5 but that seems very high
 gamma = 0.999
-lookahead_samples = 32
-lookahead_samples2 = 32  # this is in the unroll
+lookahead_samples = 16
+lookahead_samples2 = 16  # this is in the unroll
 unroll_steps = 3
+lstm_burn_in_length = 8
 
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
@@ -855,7 +927,7 @@ assert observation_space[0] == len(env.feature())
 action_space = env.action_length()
 action_space_arange = np.arange(action_space, dtype=np.int64)
 
-episode_nums = 1000
+episode_nums = 2000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = 'test_'+timing_str # 1,
 # exp_str = 'test_no_transformer_'+timing_str # 1,
@@ -927,10 +999,6 @@ for i in range(episode_nums):
   # if i % 100 == 0:
   #   torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
 
-  # if mean_score > 250 and np.mean(np.array(score_arr[-5:])) > 250:
-  #   torch.save(agent.state_dict(), f'weights_id{exp_str}.pt')
-  #   print('Done')
-  #   break
   if i % episodes_per_train_update == 0 and i >= start_training_epoch:
     print("Training update")
     agent.update_weights_mu(target, i)
@@ -940,6 +1008,7 @@ for i in range(episode_nums):
   if len(best_score_related_to_handcoded) == 0:
     best_score_related_to_handcoded = np.zeros(1)
   writer.add_scalar('best_found_score_related_to_handcoded', best_score_related_to_handcoded.mean(), global_i)
+  writer.add_scalar('best_minimal_found_score_related_to_handcoded', best_score_related_to_handcoded.min(), global_i)
   if i % episodes_per_eval == 0 and i >= start_training_epoch:
     print('best scores for each ast num', best_ast_num_scores.round(2).tolist())
     mean_score = np.mean(np.array(score_arr[i - 30:i + 1]))
