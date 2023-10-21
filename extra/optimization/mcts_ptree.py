@@ -71,9 +71,9 @@ class EfficientZeroMCTSPtree(object):
   # the default_config for EfficientZeroMCTSPtree.
   config = dict(
     # (float) The alpha value used in the Dirichlet distribution for exploration at the root node of the search tree.
-    root_dirichlet_alpha=0.3,
+    root_dirichlet_alpha=0.1,
     # (float) The noise weight at the root node of the search tree.
-    root_noise_weight=0.25,
+    root_noise_weight=0.1,
     # (int) The base constant used in the PUCT formula for balancing exploration and exploitation during tree search.
     pb_c_base=19652,
     # (float) The initialization constant used in the PUCT formula for balancing exploration and exploitation during tree search.

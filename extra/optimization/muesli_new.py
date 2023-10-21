@@ -4,8 +4,10 @@ import random
 import shelve
 import time
 from datetime import datetime
+from threading import Thread
 
 from easydict import EasyDict
+from torch.nn import BatchNorm1d, Linear
 from torch.utils.tensorboard import SummaryWriter
 
 from extra.optimization.efficientzero_funcs import negative_cosine_similarity
@@ -21,7 +23,7 @@ from typing import Tuple
 # import matplotlib.pyplot as plt
 import numpy as np
 
-np.seterr(all='raise')
+# np.seterr(all='raise')
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -115,7 +117,20 @@ class State:
     try:
       rawbufs = bufs_from_lin(self.original_lin)
       if self._reward is None:
-        tm = time_linearizer(self.lin, rawbufs)
+        result = [None]
+        def _thread(result):
+          tm = time_linearizer(self.lin, rawbufs)
+          result[0] = tm
+        t1 = Thread(target=_thread, args=(result,), daemon=True)
+        t1.start()
+        t1.join(timeout=5) # 5 seconds
+        if t1.is_alive():
+          print('thread timeout')
+          # t1.join()
+          failed = True
+          tm = 5.
+        else:
+          tm = result[0]
         assert not math.isinf(tm)
         # we clip the rewards to ensure stability. Note:
         self._reward = max((self.last_tm - tm) / self.base_tm, -5.)
@@ -222,24 +237,18 @@ class Representation(nn.Module):
   def __init__(self, input_dim, output_dim, width):
     super().__init__()
     self.skip = torch.nn.Linear(input_dim, output_dim)
-    self.layer1 = torch.nn.Linear(input_dim, width)
-    self.layer2 = torch.nn.Linear(width, width)
-    self.layer3 = torch.nn.Linear(width, width)
-    self.layer4 = torch.nn.Linear(width, width)
-    self.layer5 = torch.nn.Linear(width, output_dim)
+    activation = nn.ReLU(inplace=True)
+    self.layers = nn.Sequential(
+      Linear(input_dim, width), BatchNorm1d(width), activation,
+      Linear(width, width), BatchNorm1d(width), activation,
+      Linear(width, width), BatchNorm1d(width), activation,
+      Linear(width, output_dim))
+    self.final = nn.Sequential(BatchNorm1d(output_dim), activation)
 
   def forward(self, x):
     s = self.skip(x)
-    x = self.layer1(x)
-    x = torch.nn.functional.relu(x)
-    x = self.layer2(x)
-    x = torch.nn.functional.relu(x)
-    x = self.layer3(x)
-    x = torch.nn.functional.relu(x)
-    x = self.layer4(x)
-    x = torch.nn.functional.relu(x)
-    x = self.layer5(x)
-    x = torch.nn.functional.relu(x + s)
+    x = self.layers(x)
+    x = self.final(x + s)
     x = 2 * (x - x.min(-1, keepdim=True)[0]) / (x.max(-1, keepdim=True)[0] - x.min(-1, keepdim=True)[0]) - 1
     return x
 
@@ -261,15 +270,16 @@ class Dynamics(nn.Module):
 
   def __init__(self, input_dim, output_dim, width, action_space):
     super().__init__()
-    self.layer1 = torch.nn.Linear(input_dim + action_space, width)
-    self.layer2 = torch.nn.Linear(width, width)
-    self.layer3 = torch.nn.Linear(width, width)
-    self.hs_head = torch.nn.Linear(width, output_dim)
+    activation = nn.ReLU(inplace=True)
+    self.layers = nn.Sequential(
+      Linear(input_dim + action_space, width), BatchNorm1d(width), activation,
+      Linear(width, width), BatchNorm1d(width), activation,
+      Linear(width, width), BatchNorm1d(width), activation,
+    )
+    self.hs_head = nn.Sequential(Linear(width, output_dim), BatchNorm1d(output_dim), activation)
     self.reward_head = nn.Sequential(
-      nn.Linear(width, width),
-      nn.ReLU(),
-      nn.Linear(width, width),
-      nn.ReLU(),
+      nn.Linear(width, width), BatchNorm1d(width), activation,
+      nn.Linear(width, width), BatchNorm1d(width), activation,
       nn.Linear(width, support_size * 2 + 1)
     )
     self.one_hot_act = torch.cat((F.one_hot(torch.arange(0, action_space) % action_space, num_classes=action_space),
@@ -279,11 +289,8 @@ class Dynamics(nn.Module):
   def forward(self, x, action):
     action = self.one_hot_act[action.squeeze(1)]
     x = torch.cat((x, action.to(device)), dim=-1)
-    x = F.relu(self.layer1(x))
-    x = F.relu(self.layer2(x))
-    x = F.relu(self.layer3(x))
+    x = self.layers(x)
     hs = self.hs_head(x)
-    hs = torch.nn.functional.relu(hs)
     reward = self.reward_head(x)
     hs = 2 * (hs - hs.min(-1, keepdim=True)[0]) / (hs.max(-1, keepdim=True)[0] - hs.min(-1, keepdim=True)[0]) - 1
     return hs, reward
@@ -306,25 +313,25 @@ class Prediction(nn.Module):
     super().__init__()
     activation = nn.ReLU(inplace=True)
 
-    self.layer1 = torch.nn.Linear(input_dim, width)
-    self.layer2 = torch.nn.Linear(width, width)
+    self.layer1 = torch.nn.Linear(input_dim, width * 2)
+    self.layer2 = torch.nn.Linear(width * 2, width * 2)
+
     self.policy_head = nn.Sequential(
-      nn.Linear(width, width * 2),
-      activation,
-      nn.Linear(width * 2, width * 2),
-      activation,
+      nn.Linear(width * 2, width * 2), BatchNorm1d(width * 2), activation,
+      nn.Linear(width * 2, width * 2), BatchNorm1d(width * 2), activation,
+      nn.Linear(width * 2, width * 2), BatchNorm1d(width * 2), activation,
+      nn.Linear(width * 2, width * 2), BatchNorm1d(width * 2), activation,
       nn.Linear(width * 2, output_dim)
     )
     head_out = support_size * 2 + 1 if support_size != 1 else 1
     self.value_head = nn.Sequential(
-      nn.Linear(width, width),
-      activation,
-      nn.Linear(width, width),
-      activation,
-      nn.Linear(width, width),
-      activation,
+      nn.Linear(width * 2, width), BatchNorm1d(width), activation,
+      nn.Linear(width, width), BatchNorm1d(width), activation,
+      nn.Linear(width, width), BatchNorm1d(width), activation,
       nn.Linear(width, head_out)
     )
+    self.value_head[-1].weight.data.zero_()
+    # self.value_head[-1].bias *= 0
     # from efficientnet
     self.projection_input_dim = input_dim
     self.pred_hid = 512
@@ -332,14 +339,12 @@ class Prediction(nn.Module):
     self.proj_out = 1024
     self.pred_out = 1024
     self.projection = nn.Sequential(
-      nn.Linear(self.projection_input_dim, self.proj_hid), nn.BatchNorm1d(self.proj_hid), activation,
-      nn.Linear(self.proj_hid, self.proj_hid), nn.BatchNorm1d(self.proj_hid), activation,
-      nn.Linear(self.proj_hid, self.proj_out), nn.BatchNorm1d(self.proj_out)
+      nn.Linear(self.projection_input_dim, self.proj_hid), BatchNorm1d(self.proj_hid), activation,
+      nn.Linear(self.proj_hid, self.proj_hid), BatchNorm1d(self.proj_hid), activation,
+      nn.Linear(self.proj_hid, self.proj_out), BatchNorm1d(self.proj_out)
     )
     self.prediction_head = nn.Sequential(
-      nn.Linear(self.proj_out, self.pred_hid),
-      nn.BatchNorm1d(self.pred_hid),
-      activation,
+      nn.Linear(self.proj_out, self.pred_hid), nn.BatchNorm1d(self.pred_hid), activation,
       nn.Linear(self.pred_hid, self.pred_out),
     )
 
@@ -376,7 +381,7 @@ class Agent(nn.Module):
     self.representation_network = Representation(state_dim, state_dim * 4, width)
     self.dynamics_network = Dynamics(state_dim * 4, state_dim * 4, width, action_dim)  # todo change to lstm
     self.prediction_network = Prediction(state_dim * 4, action_dim, width)
-    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-3, weight_decay=1e-4)
+    self.optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
     self.scheduler = PolynomialLRDecay(self.optimizer, max_decay_steps=episode_nums, end_learning_rate=0.0000)
     self.to(device)
 
@@ -402,8 +407,8 @@ class Agent(nn.Module):
     Eight previous observations stacked -> representation network -> prediction network
     -> sampling action follow policy -> next env step
     """
-    mcts_temperature = max(0.25*0.99 ** episode_num, 0.01)
-    cfg = dict(num_simulations=15 if not evaluation else 20,
+    mcts_temperature = max(0.1 * 0.99 ** episode_num, 0.01)
+    cfg = dict(num_simulations=30 if not evaluation else 30,
                discount_factor=gamma,
                device=device)
     mcts_tree = EfficientZeroMCTSPtree(EasyDict(cfg))
@@ -416,9 +421,9 @@ class Agent(nn.Module):
     state_feature = self.env.feature()
     # state_dim = len(state_feature)
     state_traj, action_traj, P_traj, r_traj = [], [], [], []
-    hs = target.representation_network(torch.from_numpy(state_feature).to(device))
+    hs = target.representation_network(torch.from_numpy(state_feature).unsqueeze(0).to(device))
     _, base_v_logits = target.prediction_network(hs)
-    base_v = to_scalar(base_v_logits.unsqueeze(0))
+    base_v = to_scalar(base_v_logits).squeeze()
 
     for i in range(max_episode_length):
       current_state_state = state_feature
@@ -431,15 +436,15 @@ class Agent(nn.Module):
       # should add:
       # basetiming to state
       with torch.no_grad():
-        hs = target.representation_network(torch.from_numpy(current_state_state).to(device))
+        hs = target.representation_network(torch.from_numpy(current_state_state).unsqueeze(0).to(device))
         P, v = target.prediction_network(hs)
-      probs = P.detach().cpu().numpy()
+      probs = P.detach().cpu().numpy().squeeze()
       legal_actions = [list(get_linearizer_actions(self.env.lin).keys())]  # todo get_linearizer_actions is slow might improve
       action_mask = np.zeros((1, action_space))
       action_mask[0, legal_actions[0]] = 1
       parallel_num = 1
-      greedy = not evaluation and (episode_num < 40 or np.random.rand() < (0.98**episode_nums))# episode 100 is 0.13 chance greedy
-      if greedy:
+      greedy = not evaluation and (episode_num < greedy_episodes or np.random.rand() < (0.96 ** episode_nums))  # 0.98**100 = 0.13
+      if greedy:  # todo could cache full greedy episode
         results = []
         for action in legal_actions[0]:
           new_env, state_feature, r, done, info = self.env.step(action, dense_reward=True)  # todo might want to change to "not eval"
@@ -447,40 +452,53 @@ class Agent(nn.Module):
           results.append((new_env, state_feature, r, done, info, action, v))
         best = np.argmax([result[2] for result in results])
         self.env, state_feature, r, done, info, action, _ = results[best]
+        print('greedy', ast_num)
       else:
-        roots = EfficientZeroMCTSPtree.roots(parallel_num, legal_actions)
-        noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[j])
-                                      ).astype(np.float32).tolist() for j in range(parallel_num)]
+        mcts = True
+        if mcts:
+          roots = EfficientZeroMCTSPtree.roots(parallel_num, legal_actions)
+          noises = [np.random.dirichlet([mcts_tree._cfg.root_dirichlet_alpha] * len(legal_actions[j])
+                                        ).astype(np.float32).tolist() for j in range(parallel_num)]
 
-        roots.prepare(mcts_tree._cfg.root_noise_weight, noises, probs.reshape(1, -1))
-        # we have no reward_hidden_state_roots. we just have a single latent
-        latent_state = hs  # (the hidden state in latent space)
-        # latent_state = None # this requires an lstm that we dont have
-        mcts_tree.search(roots, target, latent_state.detach().cpu().numpy().reshape(1, -1))
-        roots_visit_count_distributions = roots.get_distributions()
-        roots_values = roots.get_values()  # shape: {list: batch_size}
-        ready_env_id = None
-        if ready_env_id is None:
-          ready_env_id = np.arange(parallel_num)
-        action = -1
-        for i, env_id in enumerate(ready_env_id):  # currently only 1 thing
-          distributions, value = roots_visit_count_distributions[i], roots_values[i]
-          # normal collect
-          # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
-          # the index within the legal action set, rather than the index in the entire action set.
-          action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
-            distributions, temperature=mcts_temperature, deterministic=evaluation
-          )
-          # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the entire action set.
-          action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
+          roots.prepare(mcts_tree._cfg.root_noise_weight, noises, probs.reshape(1, -1))
+          # we have no reward_hidden_state_roots. we just have a single latent
+          latent_state = hs  # (the hidden state in latent space)
+          # latent_state = None # this requires an lstm that we dont have
+          mcts_tree.search(roots, target, latent_state.detach().cpu().numpy().reshape(1, -1))
+          roots_visit_count_distributions = roots.get_distributions()
+          roots_values = roots.get_values()  # shape: {list: batch_size}
+          ready_env_id = None
+          if ready_env_id is None:
+            ready_env_id = np.arange(parallel_num)
+          action = -1
+          for i, env_id in enumerate(ready_env_id):  # currently only 1 thing
+            distributions, value = roots_visit_count_distributions[i], roots_values[i]
+            # normal collect
+            # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
+            # the index within the legal action set, rather than the index in the entire action set.
+            action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
+              distributions, temperature=mcts_temperature, deterministic=evaluation
+            )
+            # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the entire action set.
+            action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
+        else:
+          _probs = probs * action_mask[0]
+          if _probs.sum() == 0:
+            action = 0
+          else:
+            _probs /= _probs.sum()
+            action = np.random.choice(action_space_arange, p=_probs)
         self.env, state_feature, r, done, info = self.env.step(action, dense_reward=True)
+      # policy_action = np.argmax(probs * action_mask[0])
+
+      print('action', action)  # , 'policy_action', policy_action, 'i', i)
       if i == 0:
         for _ in range(num_state_stack):
           state_traj.append(current_state_state)
       else:
         state_traj.append(current_state_state)
       action_traj.append(action)
-      P_traj.append(P.cpu().numpy())
+      P_traj.append(probs)
       # print('r', r, 'basetm', base_tm, 'lasttm', self.env.last_tm)
       r_traj.append(r)
 
@@ -531,8 +549,10 @@ class Agent(nn.Module):
       r_traj = []
       G_arr_mb = []
       for epi_sel in range(num_replays):  # this is q
-        if (epi_sel > num_replays // 4):  ## 1/4 of replay buffer is used for on-policy data
+        if (epi_sel > num_replays / 4):  ## 1/4 of replay buffer is used for on-policy data
           ep_i = np.random.randint(0, max(1, len(self.state_replay) - 1))
+        elif (epi_sel > num_replays / 2):  ## 1/4 of replay buffer is used for greedy data
+          ep_i = np.random.randint(0, greedy_episodes)
         else:
           ep_i = -np.random.randint(max(1, episodes_per_train_update))  # pick one of the newest episodes
 
@@ -551,7 +571,7 @@ class Agent(nn.Module):
           G_arr_mb.append(G_arr[i:i + unroll_steps + 1])
           P_traj.append(self.P_replay[ep_i][i])
 
-      state_traj_i = np.array(state_traj_i)
+      # state_traj_i = np.array(state_traj_i)
       state_traj = torch.from_numpy(np.array(state_traj)).to(device)
       action_traj = torch.from_numpy(np.array(action_traj)).unsqueeze(2).to(device)
       P_traj = torch.from_numpy(np.array(P_traj)).to(device)
@@ -602,36 +622,37 @@ class Agent(nn.Module):
       first_term = -1 * importance_weight * (G_arr_mb[:, 0] - to_scalar(t_first_v_logits)) / under
 
       ## eq. 14. Lookahead inferences (one step look-ahead to some actions to estimate q_prior, from target network)
-      def lookahead(P_tensor, hs, _lookahead_samples, base_v_logits):
+      def lookahead(P_tensor, hs, _lookahead_samples, base_v_logits, under):
         with torch.no_grad():
           P_np = P_tensor.cpu().numpy()
           action1_stack_all_samples = np.zeros((len(P_np), _lookahead_samples), dtype=np.int64)
           for j, p in enumerate(P_np):
             action1_stack_all_samples[j] = np.random.choice(action_space_arange, p=p, size=_lookahead_samples)  # this is very slow!
           action1_stack_all_samples = torch.from_numpy(action1_stack_all_samples).T
-          hs, r1 = target.dynamics_network(hs.expand((*action1_stack_all_samples.shape, -1)), action1_stack_all_samples)
+          flatten_action = action1_stack_all_samples.reshape(-1, 1)
+          hs_expand_and_flatten = hs.expand((len(action1_stack_all_samples), *hs.shape)).reshape(len(flatten_action), hs.shape[-1])
+          hs, r1 = target.dynamics_network(hs_expand_and_flatten, flatten_action)
           _, v1 = target.prediction_network(hs)
-          r1_arr = to_scalar(r1)
-          v1_arr = to_scalar(v1)
+          r1_arr = to_scalar(r1).reshape(-1, _lookahead_samples)
+          v1_arr = to_scalar(v1).reshape(-1, _lookahead_samples)
           a1_arr = action1_stack_all_samples
 
-          torch.exp(torch.clip((r1_arr + gamma * v1_arr - to_scalar(base_v_logits)) / under, -1, 1))
           exp_clip_adv_arr = torch.exp(torch.clip((r1_arr + gamma * v1_arr - to_scalar(base_v_logits)) / under, -1, 1))
         return r1_arr, v1_arr, a1_arr, exp_clip_adv_arr
 
-      r1_arr, v1_arr, a1_arr, exp_clip_adv_arr = lookahead(t_first_P, t_first_hs, lookahead_samples, t_first_v_logits)
+      r1_arr, v1_arr, a1_arr, exp_clip_adv_arr = lookahead(t_first_P, t_first_hs, lookahead_samples, t_first_v_logits, under)
       ## z_cmpo_arr (eq.12)
       with torch.no_grad():
         z_cmpo_arr = []
         for k in range(lookahead_samples):  # k != i is fixed by "- exp_clip_adv_arr[k]"
-          z_cmpo = (1 + torch.sum(exp_clip_adv_arr[k], dim=0) - exp_clip_adv_arr[k]) / lookahead_samples
+          z_cmpo = (1 + torch.sum(exp_clip_adv_arr[:,k], dim=0) - exp_clip_adv_arr[:,k]) / lookahead_samples
           z_cmpo_arr.append(z_cmpo.tolist())
-      z_cmpo_arr = torch.tensor(z_cmpo_arr).to(device)
+      z_cmpo_arr = torch.tensor(z_cmpo_arr).to(device).T
 
       ## L_pg_cmpo second term (eq.11)
       second_term = 0
       for k in range(lookahead_samples):
-        second_term += exp_clip_adv_arr[k] / z_cmpo_arr[k] * torch.log(first_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device)))
+        second_term += exp_clip_adv_arr[:,k] / z_cmpo_arr[:,k] * torch.log(first_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))).squeeze()
       second_term *= -1 * regularizer_multiplier / lookahead_samples
 
       ## L_pg_cmpo
@@ -657,7 +678,7 @@ class Agent(nn.Module):
       for i in range(unroll_steps):
         _mask_batch = mask_batch[:, i + 1]  # we need to mask finished episodes
         if torch.sum(_mask_batch == 1) < 2:
-          print("Not enough correct steps")
+          print("Not enough correct steps. At step", i)
           break
         limited_unroll_steps = i + 1
         stacked_state = state_traj[:, i + 1]
@@ -673,17 +694,16 @@ class Agent(nn.Module):
         var_hat = self.var_m[i] / (1 - self.beta_product_m[i])
         under = torch.sqrt(var_hat + 1e-12)
 
-        r1_arr, v1_arr, a1_arr, exp_clip_adv_arr = lookahead(t_P, t_hs, lookahead_samples2, t_v_logits)
+        r1_arr, v1_arr, a1_arr, exp_clip_adv_arr = lookahead(t_P, t_hs, lookahead_samples2, t_v_logits, under)
 
         exp_clip_adv_arr = exp_clip_adv_arr * _mask_batch
         # ## Paper appendix F.2 : Prior policy
         t_P = 0.967 * t_P + 0.03 * P_traj + 0.003 * (torch.ones((minibatch_size, self.env.action_length())) / self.env.action_length()).to(device)
 
-        pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device))
-                        * exp_clip_adv_arr[k])
-                       .squeeze(-1).tolist() for k in range(lookahead_samples2)]
+        pi_cmpo_all = [(t_P.gather(1, torch.unsqueeze(a1_arr[k], 1).to(device)).squeeze()
+                        * exp_clip_adv_arr[:,k]) for k in range(lookahead_samples2)]
 
-        pi_cmpo_all = (torch.tensor(pi_cmpo_all).transpose(0, 1).to(device))[_mask_batch.squeeze() == 1]
+        pi_cmpo_all = (torch.stack(pi_cmpo_all).transpose(0, 1).to(device))[_mask_batch.squeeze() == 1]
         pi_cmpo_all = pi_cmpo_all / torch.sum(pi_cmpo_all, dim=1).unsqueeze(-1)
         kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
         # # I think this is right. todo but not completely sure
@@ -700,6 +720,7 @@ class Agent(nn.Module):
       for i in range(unroll_steps + 1): L_v_dist -= (to_cr(G_arr_mb[:, i]) * ls(v_logits_s[i])).sum(-1, keepdim=True) * mask_batch[:, i]
       # Just for statistics:
       for i in range(unroll_steps + 1): L_v += (to_scalar(v_logits_s[i]) - G_arr_mb[:, i]) ** 2 * mask_batch[:, i]
+      assert np.isfinite(L_v.mean().item())
       print('L_v', L_v.mean().item())
       # ## consistency_loss
       print('consistency_loss', L_consistency.mean().item())
@@ -712,14 +733,14 @@ class Agent(nn.Module):
 
       ## total loss
       # L_total = L_pg_cmpo + L_v / (unroll_steps + 1) / 4 + L_r / unroll_steps / 1 + L_m
-      L_total = L_pg_cmpo + L_v_dist + L_consistency + L_r + L_m
+      L_total = L_pg_cmpo + L_v_dist + L_consistency * 0.5 / unroll_steps + L_r / unroll_steps + L_m
       ## optimize
       self.optimizer.zero_grad()
       L_total.mean().backward()
       nn.utils.clip_grad_value_(self.parameters(), clip_value=1.0)
-      if episode_num <= 8:  # first few need smaller lr. Otherwise Nan can occur
-        for param_group in self.optimizer.param_groups:
-          param_group['lr'] = 3e-4
+      # if episode_num <= 16:  # first few need smaller lr. Otherwise Nan can occur
+      #   for param_group in self.optimizer.param_groups:
+      #     param_group['lr'] = 3e-4
       self.optimizer.step()
 
       ## target network(prior parameters) moving average update
@@ -752,7 +773,7 @@ score_arr_handcoded = []
 ast_strs = load_worlds()
 random.shuffle(ast_strs)
 
-first_ast_nums_correct = list(range(50))
+first_ast_nums_correct = list(range(2))
 # for i in deepcopy(first_ast_nums_correct):
 #   try:
 #     env = State(ast_strs, i)
@@ -764,36 +785,39 @@ first_ast_nums_correct = list(range(50))
 #     del env
 #     del first_ast_nums_correct[i]
 first_ast_nums = len(first_ast_nums_correct)
-num_replays = 64
+num_replays = 16
 seq_in_replay = 1
 minibatch_size = num_replays * seq_in_replay
 max_trials = 1
 use_sts = True
 max_episode_length = MAX_DIMS * max_trials
 num_state_stack = 1
-
-train_eval_size = 10
-test_size = 5
-train_updates = 2
+greedy_episodes = first_ast_nums*2
+train_eval_size = 1
+test_size = 1
+assert train_eval_size + test_size <= len(first_ast_nums_correct)
+train_eval_set = first_ast_nums_correct[:train_eval_size]
+test_eval_set = first_ast_nums_correct[-test_size:]
+train_updates = 4
 episodes_per_train_update = 4  # was 4
 episodes_per_eval = 256
 start_training_epoch = episodes_per_train_update  # todo set higher
 assert start_training_epoch >= episodes_per_train_update
 use_transformer = True
-alpha_target = 0.05  # 5% new to target
+alpha_target = 0.2  # 5% new to target
 
-regularizer_multiplier = 2  # was 5 but that seems very high
+regularizer_multiplier = 1  # was 5 but that seems very high
 gamma = 0.999
 lookahead_samples = 32
 lookahead_samples2 = 32  # this is in the unroll
-unroll_steps = 5
+unroll_steps = 3
 
 env = State(ast_strs, 0)
 observation_space = env.feature_shape()
 env.base_tm = -1
 assert observation_space[0] == len(env.feature())
 action_space = env.action_length()
-action_space_arange = np.arange(action_space)
+action_space_arange = np.arange(action_space, dtype=np.int64)
 
 episode_nums = 1000
 timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -803,7 +827,8 @@ timing_str = datetime.now().strftime("%Y%m%d-%H%M%S")
 # exp_str = f'greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
 # exp_str = f'0.5greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
 # exp_str = f'no_greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
-exp_str = f'partially_greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
+# exp_str = f'partially_greedy_sts{use_sts}_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
+exp_str = f'partially_greedy_sts{use_sts}_with_all_loss_astnums{len(first_ast_nums_correct)}_' + timing_str  # 1,
 del env
 target = Target(observation_space[0], action_space, 1024)
 target.eval()
@@ -885,14 +910,14 @@ for i in range(episode_nums):
     more_than_handcoded_mean = np.mean(np.array(score_arr_handcoded[i - 30:i + 1]))
     print(f'episode {i}, avg {mean_score:.2f}, avg handcoded {more_than_handcoded_mean:.2f}')
     scores, test_scores = [], []
-    for i in np.random.choice(first_ast_nums_correct[:-test_size], size=train_eval_size):  # eval
+    for i in train_eval_set:  # eval trainset
       game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, evaluation=True)
       more_than_handcoded = game_score - base_to_handcoded
       if beam:
         more_than_beam = game_score - base_to_beam
 
       scores.append([game_score, more_than_handcoded, base_to_beam])
-    for i in first_ast_nums_correct[-test_size:]:  # eval
+    for i in test_eval_set:  # eval testset
       game_score, base_to_handcoded, base_to_beam, _, frame, _ = agent.self_play_mu(target, ast_num=i, evaluation=True)
       more_than_handcoded = game_score - base_to_handcoded
       if beam:
